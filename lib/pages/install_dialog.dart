@@ -416,7 +416,9 @@ class _InstallDialogState extends State<InstallDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
+    return PopScope(
+      canPop: !isInstalling,
+      child: AlertDialog(
       title: Text(t.install.title),
       content: SizedBox(
         width: 400,
@@ -641,6 +643,7 @@ class _InstallDialogState extends State<InstallDialog> {
           ],
         ),
       ],
+      ),
     );
   }
 }
