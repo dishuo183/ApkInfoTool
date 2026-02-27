@@ -39,7 +39,11 @@ class AdaptiveIconRenderer {
     r'^\s*resource\s+(0x[0-9a-fA-F]+)\s+([A-Za-z0-9_./$-]+)',
   );
   static final RegExp _kResourceFilePattern = RegExp(
-    r'\(file\)\s+(res/[^\s)]+)',
+    r'\(file\)\s+([^\s)]+)',
+    caseSensitive: false,
+  );
+  static final RegExp _kResourceFileNoMarkerPattern = RegExp(
+    r'(?:^|\s)(res/[^\s"]+\.(?:png|jpg|jpeg|webp|xml|9\.png))',
     caseSensitive: false,
   );
   static final RegExp _kResourceColorPattern = RegExp(
@@ -57,8 +61,21 @@ class AdaptiveIconRenderer {
     r'^(?:0x-?[0-9a-fA-F]+|-?0x[0-9a-fA-F]+|-?[0-9]+)$',
   );
   static const Map<String, String> _kFrameworkColorFallback = {
-    // android:color/black
-    '0x0106000c': '#ff000000',
+    '0x0106000c': '#ff000000', // android:color/black
+    '0x0106000d': '#ffffffff', // android:color/white
+    '0x01060000': '#00000000', // android:color/transparent
+    '0x0106000e': '#ff444444', // android:color/darker_gray
+    '0x01060010': '#ffaaaaaa', // android:color/lighter_gray
+    '0x01060012': '#ff0000ff', // android:color/holo_blue_bright
+    '0x01060013': '#ff0099cc', // android:color/holo_blue_dark
+    '0x01060014': '#ff33b5e5', // android:color/holo_blue_light
+    '0x01060015': '#ffff8800', // android:color/holo_orange_dark
+    '0x01060016': '#ffffbb33', // android:color/holo_orange_light
+    '0x01060017': '#ff669900', // android:color/holo_green_dark
+    '0x01060018': '#ff99cc00', // android:color/holo_green_light
+    '0x01060019': '#ffcc0000', // android:color/holo_red_dark
+    '0x0106001a': '#ffff4444', // android:color/holo_red_light
+    '0x0106001b': '#ff9933cc', // android:color/holo_purple
   };
 
   final BinaryXmlDecompressor _binaryXmlDecompressor = BinaryXmlDecompressor();
@@ -66,6 +83,7 @@ class AdaptiveIconRenderer {
   List<String>? _zipFiles;
   final Map<String, Image> _bitmapCache = {};
   final Set<String> _failedBitmapPath = {};
+  Map<String, String>? _zipFileLowerMap;
   bool _didDraw = false;
   int _drawFillCount = 0;
   int _drawStrokeCount = 0;
@@ -155,17 +173,12 @@ class AdaptiveIconRenderer {
     if (depth > _kMaxDepth || source.isEmpty || rect.isEmpty) return;
     final trimmed = source.trim();
     if (trimmed.isEmpty) return;
-    if (depth <= 2) {
-      _debug('renderDrawable: depth=$depth source=$trimmed rect=$rect');
-    }
-
     if (_isColorLiteral(trimmed)) {
       final color = _parseColor(trimmed);
       if (color != null) {
         canvas.drawRect(rect, Paint()..color = color);
         _didDraw = true;
         _drawRectCount++;
-        _debug('renderDrawable: solid color=$trimmed');
       }
       return;
     }
@@ -207,8 +220,6 @@ class AdaptiveIconRenderer {
       canvas.drawImageRect(image, src, dst, paint);
       _didDraw = true;
       _drawBitmapCount++;
-      _debug(
-          'renderDrawableFile: bitmap=$normalized image=${image.width}x${image.height} dst=$dst');
       return;
     }
 
@@ -226,15 +237,12 @@ class AdaptiveIconRenderer {
         canvas.drawImageRect(genericBitmap, src, dst, paint);
         _didDraw = true;
         _drawBitmapCount++;
-        _debug(
-            'renderDrawableFile: generic bitmap=$normalized image=${genericBitmap.width}x${genericBitmap.height} dst=$dst');
         return;
       }
       return;
     }
     final root = await _loadXmlRoot(normalized);
     if (root == null) return;
-    _debug('renderDrawableFile: xml=$normalized root=<${root.name.local}>');
     await _renderXmlDrawableElement(canvas, rect, root, depth + 1);
   }
 
@@ -245,9 +253,6 @@ class AdaptiveIconRenderer {
     int depth,
   ) async {
     final tag = root.name.local.toLowerCase();
-    if (depth <= 3) {
-      _debug('renderXml: depth=$depth tag=$tag rect=$rect');
-    }
     switch (tag) {
       case 'adaptive-icon':
       case 'monochrome':
@@ -294,19 +299,14 @@ class AdaptiveIconRenderer {
     final foreground = _findDirectChild(root, 'foreground');
     final monochrome = _findDirectChild(root, 'monochrome');
     _debug(
-        'adaptive-icon: hasBg=${background != null} hasFg=${foreground != null} hasMono=${monochrome != null} bgDrawable=${_attr(background, 'drawable')} fgDrawable=${_attr(foreground, 'drawable')} monoDrawable=${_attr(monochrome, 'drawable')}');
+        'adaptive-icon: bg=${_attr(background, 'drawable')} fg=${_attr(foreground, 'drawable')} mono=${_attr(monochrome, 'drawable')}');
 
-    // Android launchers apply a mask to adaptive icons. The exact mask shape is
-    // launcher-dependent, so we use a rounded-rect default for preview.
     canvas.save();
     canvas.clipPath(_defaultAdaptiveMask(rect));
-    _debug('adaptive-icon: applied default rounded mask');
     final scaleTarget = foreground ?? monochrome;
     final foregroundScale =
         await _resolveAdaptiveForegroundScale(scaleTarget, depth + 1);
     final foregroundRect = _scaleRectAroundCenter(rect, foregroundScale);
-    _debug(
-        'adaptive-icon: foregroundScale=$foregroundScale (bitmap=$_kAdaptiveForegroundScaleBitmap vector=$_kAdaptiveForegroundScaleVector)');
 
     if (background != null) {
       await _renderDrawableContainer(canvas, rect, background, depth + 1);
@@ -375,8 +375,6 @@ class AdaptiveIconRenderer {
 
     final fallbackDrawable = _findDrawableLikeValue(container);
     if (fallbackDrawable != null) {
-      _debug(
-          'renderDrawableContainer: fallback drawable value=$fallbackDrawable tag=<${container.name.local}>');
       await _renderDrawable(canvas, rect, fallbackDrawable, depth + 1);
       return;
     }
@@ -384,9 +382,6 @@ class AdaptiveIconRenderer {
     final child = _firstElementChild(container);
     if (child != null) {
       await _renderXmlDrawableElement(canvas, rect, child, depth + 1);
-    } else {
-      _debug(
-          'renderDrawableContainer: no drawable/child tag=<${container.name.local}> attrs=${container.attributes.map((a) => '${a.name.qualified}=${a.value}').join(",")}');
     }
   }
 
@@ -468,9 +463,6 @@ class AdaptiveIconRenderer {
     final fillGradient = gradient == null
         ? null
         : await _buildGradientFromElement(gradient, rect, depth + 1);
-    _debug(
-        'shape: type=$shapeType solid=${solid == null ? null : _attr(solid, 'color')} resolvedFill=$fillColor hasGradient=${fillGradient != null} stroke=${stroke == null ? null : _attr(stroke, 'color')}');
-
     if (fillColor != null || fillGradient != null) {
       final fillPaint = Paint();
       if (fillGradient != null) {
@@ -553,11 +545,6 @@ class AdaptiveIconRenderer {
     if (vw <= 0 || vh <= 0) return;
     final vectorAlpha =
         _parseDimension(_attr(vector, 'alpha'), fallback: 1).clamp(0.0, 1.0);
-    final tint = _attr(vector, 'tint');
-    final tintMode = _attr(vector, 'tintMode');
-    _debug(
-        'vector: viewport=($vw,$vh) width=$width height=$height alpha=$vectorAlpha tint=$tint tintMode=$tintMode childCount=${vector.childElements.length}');
-
     canvas.save();
     canvas.translate(rect.left, rect.top);
     canvas.scale(rect.width / vw, rect.height / vh);
@@ -621,11 +608,6 @@ class AdaptiveIconRenderer {
     final groupAlpha =
         _parseDimension(_attr(group, 'alpha'), fallback: 1).clamp(0.0, 1.0);
     final combinedAlpha = (inheritedAlpha * groupAlpha).clamp(0.0, 1.0);
-    if (depth <= 3) {
-      _debug(
-          'vector.group: rotation=$rotation pivot=($pivotX,$pivotY) scale=($scaleX,$scaleY) translate=($translateX,$translateY) alpha=$groupAlpha inherited=$inheritedAlpha combined=$combinedAlpha');
-    }
-
     canvas.save();
     canvas.translate(translateX, translateY);
     canvas.translate(pivotX, pivotY);
@@ -672,7 +654,6 @@ class AdaptiveIconRenderer {
       path = _applyTrimPath(path, trimStart, trimEnd, trimOffset);
     }
     _vectorPathTotal++;
-    final pathIndex = _vectorPathTotal;
 
     final fillRaw = _attr(element, 'fillColor');
     final fillAlpha =
@@ -727,10 +708,6 @@ class AdaptiveIconRenderer {
       _drawStrokeCount++;
       _vectorPathStroked++;
     }
-    if (pathIndex <= 20) {
-      _debug(
-          'vector.path#$pathIndex: fillRaw=$fillRaw fillResolved=${resolvedFill?.debugLabel} fillAlpha=$fillAlpha inheritedAlpha=$inheritedAlpha fillType=$fillType trim=($trimStart,$trimEnd,$trimOffset) strokeRaw=${_attr(element, 'strokeColor')} strokeResolved=$strokeColor strokeAlpha=$strokeAlpha strokeWidth=$strokeWidth');
-    }
   }
 
   Future<_ResolvedVectorFill?> _resolveVectorFill(
@@ -738,22 +715,34 @@ class AdaptiveIconRenderer {
     Path path,
     int depth,
   ) async {
-    if (rawValue == null || rawValue.isEmpty || depth > _kMaxDepth) return null;
-
-    final directColor = await _resolveColorRef(rawValue, depth + 1);
-    if (directColor != null) {
-      return _ResolvedVectorFill(
-        color: directColor,
-        debugLabel: 'color:$directColor',
-      );
-    }
+    if (rawValue == null || rawValue.isEmpty) return null;
 
     final trimmed = rawValue.trim();
+
+    // 1. 直接解析颜色字面量（不需要递归，无视 depth 限制）
+    if (_isColorLiteral(trimmed)) {
+      final color = _parseColor(trimmed);
+      if (color != null) {
+        return _ResolvedVectorFill(color: color, debugLabel: 'color:$color');
+      }
+    }
+    if (_isAndroidIntLiteral(trimmed)) {
+      final color = _parseAndroidColorInt(trimmed);
+      if (color != null) {
+        return _ResolvedVectorFill(
+            color: color, debugLabel: 'int-color:$color');
+      }
+    }
+
+    // 2. 仅在需要递归解析资源引用时检查 depth
+    if (depth > _kMaxDepth) return null;
     if (!trimmed.startsWith('@')) return null;
 
+    // 3. 解析资源引用（只解析一次，避免 _resolveColorRef 内部再次重复解析）
     final resolved = await _resolveResourceReference(trimmed, depth + 1);
     if (resolved == null || resolved == trimmed) return null;
 
+    // 4. 解析结果是 XML 文件：先尝试渐变，再尝试颜色
     if (resolved.toLowerCase().endsWith('.xml')) {
       final gradient = await _resolveGradientFromXml(
         resolved,
@@ -775,6 +764,7 @@ class AdaptiveIconRenderer {
       }
     }
 
+    // 5. 解析结果不是 XML 或 XML 解析失败：作为颜色值解析
     final finalColor = await _resolveColorRef(resolved, depth + 1);
     if (finalColor != null) {
       return _ResolvedVectorFill(
@@ -811,7 +801,11 @@ class AdaptiveIconRenderer {
         in root.childElements.where((e) => e.name.local == 'item')) {
       final colorValue = _attr(item, 'color');
       final color = await _resolveColorRef(colorValue, depth + 1);
-      if (color == null) continue;
+      if (color == null) {
+        _debug(
+            'gradient item color skipped: raw=$colorValue (unresolvable at depth=$depth)');
+        continue;
+      }
       colors.add(color);
       offsets.add(_parseDimension(_attr(item, 'offset')));
     }
@@ -853,8 +847,6 @@ class AdaptiveIconRenderer {
             ? 1
             : math.max(pathBounds.width, pathBounds.height) / 2,
       );
-      _debug(
-          'gradient(radial): center=$center radius=$radius tileMode=$tileMode stops=${normalizedOffsets ?? offsets}');
       return Gradient.radial(
         center,
         radius,
@@ -870,8 +862,6 @@ class AdaptiveIconRenderer {
         _parseDimension(_attr(root, 'centerY'),
             fallback: pathBounds.isEmpty ? 0 : pathBounds.center.dy),
       );
-      _debug(
-          'gradient(sweep): center=$center tileMode=$tileMode stops=${normalizedOffsets ?? offsets}');
       return Gradient.sweep(
         center,
         colors,
@@ -901,35 +891,29 @@ class AdaptiveIconRenderer {
       start = center - dir * half;
       end = center + dir * half;
     }
-    _debug(
-        'gradient(linear): start=$start end=$end tileMode=$tileMode stops=${normalizedOffsets ?? offsets}');
     return Gradient.linear(start, end, colors, normalizedOffsets, tileMode);
   }
 
   Future<Color?> _resolveColorRef(String? value, int depth) async {
-    if (value == null || value.isEmpty || depth > _kMaxDepth) return null;
+    if (value == null || value.isEmpty) return null;
     final trimmed = value.trim();
+    // 颜色字面量不需要递归解析，无视 depth 限制
     if (_isColorLiteral(trimmed)) {
       return _parseColor(trimmed);
     }
     if (_isAndroidIntLiteral(trimmed)) {
       final parsed = _parseAndroidColorInt(trimmed);
-      if (parsed != null && depth <= 4) {
-        _debug('resolveColorRef(int): $trimmed -> $parsed');
-      }
       return parsed;
     }
 
+    // 仅在需要递归解析资源引用时检查 depth
+    if (depth > _kMaxDepth) return null;
     if (!trimmed.startsWith('@')) return null;
     final resolved = await _resolveResourceReference(trimmed, depth + 1);
     if (resolved == null || resolved == trimmed) return null;
-    if (depth <= 4) {
-      _debug('resolveColorRef: $trimmed -> $resolved');
-    }
     if (resolved.toLowerCase().endsWith('.xml')) {
       final xmlColor = await _resolveColorFromXml(resolved, depth + 1);
       if (xmlColor != null) {
-        _debug('resolveColorRef(xml): $resolved -> $xmlColor');
         return xmlColor;
       }
     }
@@ -952,9 +936,9 @@ class AdaptiveIconRenderer {
       final resolved = _resolveEntryValue(entry);
       final withFallback = resolved ?? _resolveFrameworkReference(id);
       _resolvedRefCount++;
-      if (_resolvedRefCount <= 80) {
+      if (_resolvedRefCount <= 20) {
         _debug(
-            'resolveRef(id): $trimmed -> $withFallback entryName=${entry?.name} files=${entry?.filePaths.length ?? 0} colors=${entry?.colors.length ?? 0} refs=${entry?.references.length ?? 0}');
+            'resolveRef: $trimmed -> $withFallback (${entry?.name})');
       }
       return withFallback;
     }
@@ -968,9 +952,9 @@ class AdaptiveIconRenderer {
       final picked = _pickBestEntry(entries);
       final resolved = _resolveEntryValue(picked);
       _resolvedRefCount++;
-      if (_resolvedRefCount <= 80) {
+      if (_resolvedRefCount <= 20) {
         _debug(
-            'resolveRef(name): $trimmed -> $resolved pick=${picked.name} files=${picked.filePaths.length} colors=${picked.colors.length} refs=${picked.references.length}');
+            'resolveRef: $trimmed -> $resolved (${picked.name})');
       }
       return resolved;
     }
@@ -988,7 +972,75 @@ class AdaptiveIconRenderer {
     if (entry.references.isNotEmpty) {
       return entry.references.first;
     }
+    // Fallback: 资源条目有名称但无数据时，按名称在 zip 中查找匹配文件
+    if (entry.name.isNotEmpty) {
+      final found = _findFileByResourceName(entry.name);
+      if (found != null) {
+        _debug('resolveEntryValue fallback: ${entry.name} -> $found');
+        return found;
+      }
+    }
     return null;
+  }
+
+  /// 根据资源名（如 mipmap/ic_launcher_foreground）在 zip 文件列表中查找匹配的文件。
+  /// 优先返回高密度位图，其次 XML。
+  String? _findFileByResourceName(String resourceName) {
+    // resourceName 格式: "type/name"，例如 "mipmap/ic_launcher_foreground"
+    final parts = resourceName.split('/');
+    if (parts.length != 2) return null;
+    final type = parts[0].toLowerCase(); // e.g. "mipmap", "drawable"
+    final name = parts[1].toLowerCase(); // e.g. "ic_launcher_foreground"
+
+    _zipFiles ??= zip.listFiles();
+
+    // 关联资源类型：mipmap <-> drawable 可互相搜索
+    final relatedTypes = <String>{type};
+    if (type == 'mipmap') relatedTypes.add('drawable');
+    if (type == 'drawable') relatedTypes.add('mipmap');
+
+    final candidates = <String>[];
+    final broadCandidates = <String>[];
+
+    for (final f in _zipFiles!) {
+      final lower = f.toLowerCase();
+      if (!lower.startsWith('res/')) continue;
+      // 提取文件名（不含扩展名）
+      final lastSlash = f.lastIndexOf('/');
+      if (lastSlash < 0) continue;
+      final fileName = f.substring(lastSlash + 1).toLowerCase();
+      final dotIndex = fileName.lastIndexOf('.');
+      final baseName = dotIndex > 0 ? fileName.substring(0, dotIndex) : fileName;
+      if (baseName != name) continue;
+
+      // 检查目录是否与资源类型匹配
+      final afterRes = lower.substring(4); // 去掉 "res/"
+      bool matched = false;
+      for (final t in relatedTypes) {
+        if (afterRes.startsWith('$t-') || afterRes.startsWith('$t/')) {
+          matched = true;
+          break;
+        }
+      }
+      if (matched) {
+        candidates.add(f);
+      } else {
+        broadCandidates.add(f);
+      }
+    }
+
+    // 优先使用精确匹配类型的候选
+    final selected = candidates.isNotEmpty ? candidates : broadCandidates;
+    if (selected.isEmpty) {
+      _debug(
+          'findFileByResourceName: no match for $resourceName (zipFiles=${_zipFiles!.length})');
+      return null;
+    }
+    if (selected.length == 1) return selected.first;
+    selected.sort((a, b) => _fileScore(b).compareTo(_fileScore(a)));
+    _debug(
+        'findFileByResourceName: $resourceName -> ${selected.first} (${selected.length} candidates)');
+    return selected.first;
   }
 
   _ResourceEntry _pickBestEntry(List<_ResourceEntry> entries) {
@@ -1018,16 +1070,16 @@ class AdaptiveIconRenderer {
     final hasExtension =
         lower.contains('.') && lower.lastIndexOf('/') < lower.lastIndexOf('.');
     final isXml = lower.endsWith('.xml');
-    if (!isXml &&
+    if (isXml) {
+      score += 420;
+    } else if (!isXml &&
         (lower.endsWith('.png') ||
             lower.endsWith('.webp') ||
             lower.endsWith('.jpg') ||
             lower.endsWith('.jpeg'))) {
-      score += 420;
-    } else if (!isXml && !hasExtension) {
-      score += 360;
-    } else if (isXml) {
       score += 180;
+    } else if (!isXml && !hasExtension) {
+      score += 160;
     }
     if (lower.contains('anydpi-v26')) {
       score += isXml ? 20 : 160;
@@ -1080,23 +1132,67 @@ class AdaptiveIconRenderer {
     final byId = <String, _ResourceEntry>{};
     final byName = <String, List<_ResourceEntry>>{};
     _ResourceEntry? current;
+    List<String>? currentRawLines;
+    final emptyEntryRawLines = <String, List<String>>{};
 
     for (final rawLine in output.split('\n')) {
       final line = rawLine.trimRight();
       final resourceMatch = _kResourceLinePattern.firstMatch(line);
       if (resourceMatch != null) {
+        // 保存上一个条目的原始行（仅当条目为空且类型为 mipmap/drawable 时）
+        if (current != null &&
+            currentRawLines != null &&
+            current.filePaths.isEmpty &&
+            current.colors.isEmpty &&
+            current.references.isEmpty) {
+          final name = current.name;
+          if (name.startsWith('mipmap/') || name.startsWith('drawable/')) {
+            emptyEntryRawLines[current.id] = currentRawLines;
+          }
+        }
         final id = _normalizeResourceId(resourceMatch.group(1)!);
         final name = resourceMatch.group(2)!.trim().toLowerCase();
         current =
             byId.putIfAbsent(id, () => _ResourceEntry(id: id, name: name));
         current.name = name;
-        byName.putIfAbsent(name, () => []).add(current);
+        currentRawLines = [];
+        final list = byName.putIfAbsent(name, () => []);
+        if (!list.contains(current)) list.add(current);
         continue;
       }
       if (current == null) continue;
+      currentRawLines?.add(line);
 
       for (final m in _kResourceFilePattern.allMatches(line)) {
         current.filePaths.add(_normalizeZipPath(m.group(1)!));
+      }
+      if (current.filePaths.isEmpty) {
+        for (final m in _kResourceFileNoMarkerPattern.allMatches(line)) {
+          current.filePaths.add(_normalizeZipPath(m.group(1)!));
+        }
+      }
+      // Fallback: 混淆 APK 可能输出裸文件名（如 uF.xml 或 "AndroidManifest.xml/0y.png"）
+      if (current.filePaths.isEmpty) {
+        for (var token in line.trim().split(RegExp(r'\s+'))) {
+          // 去除 aapt2 输出中的包裹引号
+          if (token.length >= 2 &&
+              token.startsWith('"') &&
+              token.endsWith('"')) {
+            token = token.substring(1, token.length - 1);
+          }
+          final lower = token.toLowerCase();
+          if ((lower.endsWith('.xml') ||
+                  lower.endsWith('.png') ||
+                  lower.endsWith('.webp') ||
+                  lower.endsWith('.jpg') ||
+                  lower.endsWith('.jpeg')) &&
+              !token.contains('=') &&
+              !token.startsWith('#') &&
+              !token.startsWith('(') &&
+              !token.startsWith('0x')) {
+            current.filePaths.add(_normalizeZipPath(token));
+          }
+        }
       }
       for (final m in _kResourceColorPattern.allMatches(line)) {
         current.colors.add(m.group(0)!.toLowerCase());
@@ -1111,11 +1207,33 @@ class AdaptiveIconRenderer {
       }
     }
 
+    // 保存最后一个条目的原始行
+    if (current != null &&
+        currentRawLines != null &&
+        current.filePaths.isEmpty &&
+        current.colors.isEmpty &&
+        current.references.isEmpty) {
+      final name = current.name;
+      if (name.startsWith('mipmap/') || name.startsWith('drawable/')) {
+        emptyEntryRawLines[current.id] = currentRawLines;
+      }
+    }
+
     for (final entry in byId.values) {
       entry.filePaths = entry.filePaths.toSet().toList();
       entry.colors = entry.colors.toSet().toList();
       entry.references = entry.references.toSet().toList();
     }
+
+    // 输出空的 mipmap/drawable 条目的原始 aapt2 行，辅助调试
+    for (final e in emptyEntryRawLines.entries) {
+      final entry = byId[e.key];
+      if (entry != null) {
+        _debug(
+            'emptyResourceEntry: ${entry.id} ${entry.name} rawLines=${e.value.length} content=${e.value.take(5).map((l) => l.trim()).join(" | ")}');
+      }
+    }
+
     return _ResourceTable(byId: byId, byName: byName);
   }
 
@@ -1149,8 +1267,6 @@ class AdaptiveIconRenderer {
     try {
       final xmlText = _decodeXmlText(bytes);
       final doc = xml.XmlDocument.parse(xmlText);
-      _debug(
-          'loadXmlRoot success: $filePath root=<${doc.rootElement.name.local}> bytes=${bytes.length}');
       return doc.rootElement;
     } catch (e) {
       final preview =
@@ -1317,25 +1433,34 @@ class AdaptiveIconRenderer {
       if (data != null && data.isNotEmpty) return data;
     }
 
-    final allFiles = await _listZipFiles();
-    final lower = normalized.toLowerCase();
-    final match = allFiles.cast<String?>().firstWhere(
-          (f) => f != null && f.toLowerCase() == lower,
-          orElse: () => null,
-        );
+    final lowerMap = _getZipFileLowerMap();
+    final match = lowerMap[normalized.toLowerCase()];
     if (match != null) {
       return zip.readFileContent(match);
     }
     return null;
   }
 
-  Future<List<String>> _listZipFiles() async {
-    _zipFiles ??= zip.listFiles();
-    return _zipFiles!;
+  Map<String, String> _getZipFileLowerMap() {
+    if (_zipFileLowerMap == null) {
+      _zipFiles ??= zip.listFiles();
+      _zipFileLowerMap = {};
+      for (final f in _zipFiles!) {
+        // 保留第一个匹配，避免同名不同大小写的文件覆盖
+        _zipFileLowerMap!.putIfAbsent(f.toLowerCase(), () => f);
+      }
+    }
+    return _zipFileLowerMap!;
   }
 
   String _normalizeZipPath(String value) {
     var normalized = value.trim().replaceAll('\\', '/');
+    // 去除混淆 APK 中 aapt2 输出的包裹引号
+    if (normalized.length >= 2 &&
+        normalized.startsWith('"') &&
+        normalized.endsWith('"')) {
+      normalized = normalized.substring(1, normalized.length - 1);
+    }
     if (normalized.startsWith('file://')) {
       normalized = normalized.substring('file://'.length);
     }

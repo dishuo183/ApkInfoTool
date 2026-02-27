@@ -618,11 +618,11 @@ class ApkInfo {
     return score;
   }
 
-  List<String> _findUnknownCandidatePaths(ZipHelper zip, String candidate) {
+  List<String> _findUnknownCandidatePaths(List<String> allFiles, String candidate) {
     final raw = candidate.trim();
     if (raw.isEmpty) return const [];
     final normalized = raw.replaceAll('\\', '/');
-    final files = zip.listFiles();
+    final files = allFiles;
     final result = <String>{};
     if (files.contains(normalized)) {
       result.add(normalized);
@@ -660,6 +660,7 @@ class ApkInfo {
       zip.open(apkPath);
       AdaptiveIconRenderer? adaptiveIconRenderer;
       final aaptPath = CommandTools.findAapt2Path();
+      final allFiles = zip.listFiles();
 
       final candidates = <String>[];
       if (mainIconPath != null && mainIconPath!.isNotEmpty) {
@@ -676,26 +677,28 @@ class ApkInfo {
       final prioritizedCandidates = <String>[];
       final prioritizedSeen = <String>{};
       for (final iconPath in uniqueCandidates) {
+        var resourceLinkedBitmaps = <String>[];
         if (_isXmlPath(iconPath) && aaptPath != null && aaptPath.isNotEmpty) {
           adaptiveIconRenderer ??= AdaptiveIconRenderer(
             apkPath: apkPath,
             aaptPath: aaptPath,
             zip: zip,
           );
-          final resourceLinkedBitmaps = await adaptiveIconRenderer
+          resourceLinkedBitmaps = await adaptiveIconRenderer
               .findBitmapAlternativesForPath(iconPath);
           if (resourceLinkedBitmaps.isNotEmpty) {
             log.fine(
                 'loadIcon: XML 资源同条目位图候选($iconPath) => ${resourceLinkedBitmaps.join(", ")}');
           }
-          for (final bitmap in resourceLinkedBitmaps) {
-            if (prioritizedSeen.add(bitmap)) {
-              prioritizedCandidates.add(bitmap);
-            }
-          }
         }
+        // XML（矢量图）优先，位图作为回退
         if (prioritizedSeen.add(iconPath)) {
           prioritizedCandidates.add(iconPath);
+        }
+        for (final bitmap in resourceLinkedBitmaps) {
+          if (prioritizedSeen.add(bitmap)) {
+            prioritizedCandidates.add(bitmap);
+          }
         }
       }
       log.info('loadIcon: candidates=${prioritizedCandidates.join(", ")}');
@@ -741,7 +744,7 @@ class ApkInfo {
             }
           }
 
-          final resolvedPaths = _findUnknownCandidatePaths(zip, iconPath);
+          final resolvedPaths = _findUnknownCandidatePaths(allFiles, iconPath);
           for (final resolved in resolvedPaths) {
             if (_isXmlPath(resolved)) {
               if (aaptPath == null || aaptPath.isEmpty) continue;
@@ -771,8 +774,7 @@ class ApkInfo {
       }
 
       // 兜底：从 APK 中启发式扫描可能的启动图标资源
-      final fallbackCandidates = zip
-          .listFiles()
+      final fallbackCandidates = allFiles
           .where((e) {
             final lower = e.toLowerCase();
             return lower.contains('mipmap') ||
