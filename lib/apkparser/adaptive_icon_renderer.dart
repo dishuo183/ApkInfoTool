@@ -22,6 +22,15 @@ class AdaptiveIconRenderer {
   final String aaptPath;
   final ZipHelper zip;
 
+  /// 释放缓存的 dart:ui.Image GPU 资源
+  void dispose() {
+    for (final image in _bitmapCache.values) {
+      image.dispose();
+    }
+    _bitmapCache.clear();
+    _failedBitmapPath.clear();
+  }
+
   static const int _kCanvasSize = 432;
   static const int _kMaxDepth = 16;
   static const double _kAdaptiveForegroundScaleBitmap = 1.60;
@@ -125,7 +134,9 @@ class AdaptiveIconRenderer {
       final picture = recorder.endRecording();
       _debug(
           'render end: drawn=true fills=$_drawFillCount strokes=$_drawStrokeCount rects=$_drawRectCount bitmaps=$_drawBitmapCount vectorPath(total=$_vectorPathTotal, filled=$_vectorPathFilled, stroked=$_vectorPathStroked) refs=$_resolvedRefCount');
-      return picture.toImage(_kCanvasSize, _kCanvasSize);
+      final image = await picture.toImage(_kCanvasSize, _kCanvasSize);
+      picture.dispose();
+      return image;
     } catch (e) {
       log.warning('AdaptiveIconRenderer.render failed: $e');
       return null;
@@ -1251,6 +1262,7 @@ class AdaptiveIconRenderer {
     try {
       final codec = await instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
+      codec.dispose();
       _bitmapCache[normalized] = frame.image;
       return frame.image;
     } catch (e) {

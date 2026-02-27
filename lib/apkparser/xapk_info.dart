@@ -128,10 +128,14 @@ class SplitApk {
   }
 }
 
-Future<XapkManifest?> parseXapkManifest(String xapkPath) async {
-  final zip = ZipHelper();
+/// 解析 XAPK 清单文件
+/// [sharedZip] 可选的共享 ZipHelper 实例，避免重复打开同一个文件
+Future<XapkManifest?> parseXapkManifest(String xapkPath,
+    {ZipHelper? sharedZip}) async {
+  final zip = sharedZip ?? ZipHelper();
+  final shouldClose = sharedZip == null;
   try {
-    if (!zip.open(xapkPath)) return null;
+    if (shouldClose && !await zip.open(xapkPath)) return null;
     final manifestData = await zip.readFileContent('manifest.json') ??
         await zip.readFileContent('info.json');
     if (manifestData == null) return null;
@@ -143,14 +147,18 @@ Future<XapkManifest?> parseXapkManifest(String xapkPath) async {
     log.severe('Failed to parse XAPK manifest: $e');
     return null;
   } finally {
-    zip.close();
+    if (shouldClose) zip.close();
   }
 }
 
-Future<Image?> loadXapkIcon(String xapkPath, {String? iconPath}) async {
-  final zip = ZipHelper();
+/// 加载 XAPK 图标
+/// [sharedZip] 可选的共享 ZipHelper 实例，避免重复打开同一个文件
+Future<Image?> loadXapkIcon(String xapkPath,
+    {String? iconPath, ZipHelper? sharedZip}) async {
+  final zip = sharedZip ?? ZipHelper();
+  final shouldClose = sharedZip == null;
   try {
-    if (!zip.open(xapkPath)) return null;
+    if (shouldClose && !await zip.open(xapkPath)) return null;
     final candidates = <String>[
       if (iconPath != null && iconPath.isNotEmpty) iconPath,
       'icon.png',
@@ -164,10 +172,11 @@ Future<Image?> loadXapkIcon(String xapkPath, {String? iconPath}) async {
 
     final codec = await instantiateImageCodec(iconData);
     final frame = await codec.getNextFrame();
+    codec.dispose();
     return frame.image;
   } catch (e) {
     return null;
   } finally {
-    zip.close();
+    if (shouldClose) zip.close();
   }
 }

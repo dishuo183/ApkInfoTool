@@ -11,10 +11,12 @@ class CurrentApkInfo extends _$CurrentApkInfo {
   }
 
   void update(ApkInfo? apkInfo) {
+    state?.dispose();
     state = apkInfo;
   }
 
   void reset() {
+    state?.dispose();
     state = null;
   }
 }

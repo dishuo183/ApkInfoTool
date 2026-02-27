@@ -9,15 +9,19 @@ class ZipHelper {
   Archive? _archive;
   String? _filePath;
 
-  bool open(String filePath) {
+  /// 打开 ZIP 文件，使用 InputFileStream 流式读取避免将整个文件加载到内存
+  Future<bool> open(String filePath) async {
+    InputFileStream? inputStream;
     try {
       _filePath = filePath;
-      final bytes = File(filePath).readAsBytesSync();
-      _archive = ZipDecoder().decodeBytes(bytes);
+      inputStream = InputFileStream(filePath);
+      _archive = ZipDecoder().decodeStream(inputStream);
       return true;
     } catch (e) {
       log.severe('Failed to open zip file: $e');
       return false;
+    } finally {
+      inputStream?.closeSync();
     }
   }
 

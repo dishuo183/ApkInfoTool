@@ -56,8 +56,10 @@ bool _looksLikeSplitDensity(String value) {
   return value.endsWith('dpi');
 }
 
+final _kSplitLanguagePattern = RegExp(r'^[a-z]{2,3}(-r[a-z]{2})?$');
+
 bool _looksLikeSplitLanguage(String value) {
-  return RegExp(r'^[a-z]{2,3}(-r[a-z]{2})?$').hasMatch(value);
+  return _kSplitLanguagePattern.hasMatch(value);
 }
 
 bool _hasOnlyPlaceholderLocales(List<String> locales) {
@@ -140,100 +142,111 @@ Future<ApkInfo?> getApkInfo(String apk) async {
     apkInfo.isXapk = true;
     apkInfo.archiveType = _archiveTypeFromExtension(extension);
 
-    final manifest = await parseXapkManifest(apk);
+    // 共享同一个 ZipHelper 实例，避免重复打开同一个大文件
     final zip = ZipHelper();
     Directory? tempDir;
     String? baseApkPath;
+    XapkManifest? manifest;
     try {
-      if (zip.open(apk)) {
-        apkInfo.archiveApks = zip.listFiles(extension: '.apk');
-        apkInfo.obbFiles = zip.listFiles(extension: '.obb');
+      if (!await zip.open(apk)) {
+        log.warning("getApkInfo: failed to open XAPK file");
+        return null;
+      }
 
-        final baseEntry = _findBaseApkEntry(apkInfo.archiveApks);
-        if (baseEntry != null) {
-          tempDir = await Directory.systemTemp.createTemp('apk_info_base');
-          baseApkPath = path.join(tempDir.path, path.basename(baseEntry));
-          final extracted = await zip.extractFile(baseEntry, baseApkPath);
-          if (extracted) {
-            try {
-              final aaptPath = CommandTools.findAapt2Path();
-              if (aaptPath == null || aaptPath.isEmpty) {
-                throw Exception(t.parse.please_set_path(name: 'aapt2'));
-              }
-              final result = await Process.run(
-                aaptPath,
-                ['dump', 'badging', baseApkPath],
-                stdoutEncoding: utf8,
-                stderrEncoding: utf8,
-              ).timeout(
-                const Duration(seconds: 120),
-                onTimeout: () {
-                  throw TimeoutException('Parse timeout');
-                },
-              );
-              if (result.exitCode == 0) {
-                final originalPath = apkInfo.apkPath;
-                apkInfo.apkPath = baseApkPath;
-                parseApkInfoFromOutput(result.stdout.toString(), apkInfo);
-                final iconImage = await apkInfo.loadIcon();
-                if (iconImage != null) {
-                  apkInfo.mainIconImage ??= iconImage;
-                }
-                apkInfo.apkPath = originalPath;
-              }
-            } catch (e) {
-              log.warning("getApkInfo: base APK parse failed: $e");
+      // 使用共享的 zip 实例解析清单（不再重新打开文件）
+      manifest = await parseXapkManifest(apk, sharedZip: zip);
+
+      apkInfo.archiveApks = zip.listFiles(extension: '.apk');
+      apkInfo.obbFiles = zip.listFiles(extension: '.obb');
+
+      final baseEntry = _findBaseApkEntry(apkInfo.archiveApks);
+      if (baseEntry != null) {
+        tempDir = await Directory.systemTemp.createTemp('apk_info_base');
+        baseApkPath = path.join(tempDir.path, path.basename(baseEntry));
+        final extracted = await zip.extractFile(baseEntry, baseApkPath);
+        if (extracted) {
+          try {
+            final aaptPath = CommandTools.findAapt2Path();
+            if (aaptPath == null || aaptPath.isEmpty) {
+              throw Exception(t.parse.please_set_path(name: 'aapt2'));
             }
+            final result = await Process.run(
+              aaptPath,
+              ['dump', 'badging', baseApkPath],
+              stdoutEncoding: utf8,
+              stderrEncoding: utf8,
+            ).timeout(
+              const Duration(seconds: 120),
+              onTimeout: () {
+                throw TimeoutException('Parse timeout');
+              },
+            );
+            if (result.exitCode == 0) {
+              final originalPath = apkInfo.apkPath;
+              apkInfo.apkPath = baseApkPath;
+              parseApkInfoFromOutput(result.stdout.toString(), apkInfo);
+              final iconImage = await apkInfo.loadIcon();
+              if (iconImage != null) {
+                apkInfo.mainIconImage ??= iconImage;
+              }
+              apkInfo.apkPath = originalPath;
+            }
+          } catch (e) {
+            log.warning("getApkInfo: base APK parse failed: $e");
           }
+        }
+      }
+
+      if (manifest != null) {
+        if (manifest.packageName?.isNotEmpty == true) {
+          apkInfo.packageName = manifest.packageName;
+        }
+        if (manifest.versionCode != null && manifest.versionCode! > 0) {
+          apkInfo.versionCode = manifest.versionCode;
+        }
+        if (manifest.versionName?.isNotEmpty == true) {
+          apkInfo.versionName = manifest.versionName;
+        }
+        if (manifest.minSdkVersion != null && manifest.minSdkVersion! > 0) {
+          apkInfo.sdkVersion = manifest.minSdkVersion;
+        }
+        if (manifest.targetSdkVersion != null &&
+            manifest.targetSdkVersion! > 0) {
+          apkInfo.targetSdkVersion = manifest.targetSdkVersion;
+        }
+        if (manifest.name?.isNotEmpty == true) {
+          apkInfo.label = manifest.name;
+          apkInfo.xapkName = manifest.name;
+        }
+        if (apkInfo.usesPermissions.isEmpty &&
+            manifest.permissions.isNotEmpty) {
+          apkInfo.usesPermissions = manifest.permissions;
+        }
+        if (manifest.splitConfigs.isNotEmpty) {
+          apkInfo.splitConfigs = manifest.splitConfigs;
+        }
+        if (manifest.splitApks.isNotEmpty) {
+          apkInfo.splitApks = manifest.splitApks.map((e) => e.file).toList();
+        }
+        if (manifest.totalSize != null && manifest.totalSize! > 0) {
+          apkInfo.totalSize = manifest.totalSize;
+        }
+        // 使用共享的 zip 实例加载图标（不再重新打开文件）
+        final iconImage = await loadXapkIcon(apk,
+            iconPath: manifest.icon, sharedZip: zip);
+        if (iconImage != null && apkInfo.mainIconImage == null) {
+          apkInfo.mainIconImage = iconImage;
+        }
+      } else {
+        final iconImage = await loadXapkIcon(apk, sharedZip: zip);
+        if (iconImage != null && apkInfo.mainIconImage == null) {
+          apkInfo.mainIconImage = iconImage;
         }
       }
     } finally {
       zip.close();
       if (tempDir != null && await tempDir.exists()) {
         await tempDir.delete(recursive: true);
-      }
-    }
-
-    if (manifest != null) {
-      if (manifest.packageName?.isNotEmpty == true) {
-        apkInfo.packageName = manifest.packageName;
-      }
-      if (manifest.versionCode != null && manifest.versionCode! > 0) {
-        apkInfo.versionCode = manifest.versionCode;
-      }
-      if (manifest.versionName?.isNotEmpty == true) {
-        apkInfo.versionName = manifest.versionName;
-      }
-      if (manifest.minSdkVersion != null && manifest.minSdkVersion! > 0) {
-        apkInfo.sdkVersion = manifest.minSdkVersion;
-      }
-      if (manifest.targetSdkVersion != null && manifest.targetSdkVersion! > 0) {
-        apkInfo.targetSdkVersion = manifest.targetSdkVersion;
-      }
-      if (manifest.name?.isNotEmpty == true) {
-        apkInfo.label = manifest.name;
-        apkInfo.xapkName = manifest.name;
-      }
-      if (apkInfo.usesPermissions.isEmpty && manifest.permissions.isNotEmpty) {
-        apkInfo.usesPermissions = manifest.permissions;
-      }
-      if (manifest.splitConfigs.isNotEmpty) {
-        apkInfo.splitConfigs = manifest.splitConfigs;
-      }
-      if (manifest.splitApks.isNotEmpty) {
-        apkInfo.splitApks = manifest.splitApks.map((e) => e.file).toList();
-      }
-      if (manifest.totalSize != null && manifest.totalSize! > 0) {
-        apkInfo.totalSize = manifest.totalSize;
-      }
-      final iconImage = await loadXapkIcon(apk, iconPath: manifest.icon);
-      if (iconImage != null && apkInfo.mainIconImage == null) {
-        apkInfo.mainIconImage = iconImage;
-      }
-    } else {
-      final iconImage = await loadXapkIcon(apk);
-      if (iconImage != null && apkInfo.mainIconImage == null) {
-        apkInfo.mainIconImage = iconImage;
       }
     }
 
@@ -320,6 +333,11 @@ Future<String> getSignatureInfo(String apkPath) async {
       ['verify', '--print-certs', '--verbose', apkPath],
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
+    ).timeout(
+      const Duration(seconds: 120),
+      onTimeout: () {
+        throw TimeoutException('apksigner verify timeout');
+      },
     );
 
     if (result.exitCode == 0) {
@@ -596,6 +614,7 @@ class ApkInfo {
     try {
       final codec = await instantiateImageCodec(data);
       final frame = await codec.getNextFrame();
+      codec.dispose();
       return frame.image;
     } catch (_) {
       return null;
@@ -656,9 +675,9 @@ class ApkInfo {
     }
 
     final zip = ZipHelper();
+    AdaptiveIconRenderer? adaptiveIconRenderer;
     try {
-      zip.open(apkPath);
-      AdaptiveIconRenderer? adaptiveIconRenderer;
+      await zip.open(apkPath);
       final aaptPath = CommandTools.findAapt2Path();
       final allFiles = zip.listFiles();
 
@@ -812,6 +831,7 @@ class ApkInfo {
     } catch (e) {
       log.warning('loadIcon: 加载图标失败: $e');
     } finally {
+      adaptiveIconRenderer?.dispose();
       zip.close();
     }
     return null;
@@ -820,6 +840,12 @@ class ApkInfo {
   @override
   String toString() {
     return 'ApkInfo{apkPath: $apkPath, apkSize: $apkSize, isXapk: $isXapk, archiveType: $archiveType, packageName: $packageName, versionCode: $versionCode, versionName: $versionName, platformBuildVersionName: $platformBuildVersionName, platformBuildVersionCode: $platformBuildVersionCode, compileSdkVersion: $compileSdkVersion, compileSdkVersionCodename: $compileSdkVersionCodename, sdkVersion: $sdkVersion, targetSdkVersion: $targetSdkVersion, label: $label, mainIcon: $mainIconPath, labels: $labels, usesPermissions: $usesPermissions, icons: $icons, application: $application, launchableActivity: $launchableActivity, userFeatures: $userFeatures, userFeaturesNotRequired: $userFeaturesNotRequired, userImpliedFeatures: $userImpliedFeatures, supportsScreens: $supportsScreens, locales: $locales, densities: $densities, supportsAnyDensity: $supportsAnyDensity, nativeCodes: $nativeCodes, others: $others, signatureInfo: $signatureInfo, xapkName: $xapkName, splitConfigs: $splitConfigs, splitApks: $splitApks, archiveApks: $archiveApks, obbFiles: $obbFiles, totalSize: $totalSize}';
+  }
+
+  /// 释放持有的 GPU 资源（dart:ui.Image）
+  void dispose() {
+    mainIconImage?.dispose();
+    mainIconImage = null;
   }
 
   void reset() {
@@ -838,6 +864,7 @@ class ApkInfo {
     targetSdkVersion = null;
     label = null;
     mainIconPath = null;
+    mainIconImage?.dispose();
     mainIconImage = null;
     labels.clear();
     usesPermissions.clear();
