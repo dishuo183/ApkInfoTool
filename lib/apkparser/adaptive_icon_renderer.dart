@@ -1,0 +1,1591 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui';
+
+import 'package:apk_info_tool/apkparser/binary_xml.dart';
+import 'package:apk_info_tool/utils/logger.dart';
+import 'package:apk_info_tool/utils/zip_helper.dart';
+import 'package:path_drawing/path_drawing.dart';
+import 'package:xml/xml.dart' as xml;
+
+class AdaptiveIconRenderer {
+  AdaptiveIconRenderer({
+    required this.apkPath,
+    required this.aaptPath,
+    required this.zip,
+  });
+
+  final String apkPath;
+  final String aaptPath;
+  final ZipHelper zip;
+
+  static const int _kCanvasSize = 432;
+  static const int _kMaxDepth = 16;
+  static const double _kAdaptiveForegroundScaleBitmap = 1.60;
+  static const double _kAdaptiveForegroundScaleVector = 1.28;
+  static final RegExp _kResourceIdPattern = RegExp(
+    r'^@(?:res/)?(0x[0-9a-fA-F]+)$',
+  );
+  static final RegExp _kNamedResourcePattern = RegExp(
+    r'^@(?:\+)?(?:[\w.]+:)?([a-zA-Z_][\w-]*)/([a-zA-Z0-9_.$-]+)$',
+  );
+  static final RegExp _kHexColorPattern = RegExp(
+    r'^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$',
+  );
+  static final RegExp _kResourceLinePattern = RegExp(
+    r'^\s*resource\s+(0x[0-9a-fA-F]+)\s+([A-Za-z0-9_./$-]+)',
+  );
+  static final RegExp _kResourceFilePattern = RegExp(
+    r'\(file\)\s+(res/[^\s)]+)',
+    caseSensitive: false,
+  );
+  static final RegExp _kResourceColorPattern = RegExp(
+    r'#[0-9a-fA-F]{6,8}\b',
+  );
+  static final RegExp _kResourceRefPattern = RegExp(
+    r'@(0x[0-9a-fA-F]+|(?:[\w.]+:)?[a-zA-Z_][\w-]*/[a-zA-Z0-9_.$-]+)',
+  );
+  static final RegExp _kDensityPattern = RegExp(
+    r'-(ldpi|mdpi|hdpi|xhdpi|xxhdpi|xxxhdpi)(?:-|$)',
+  );
+  static final RegExp _kLeadingNumberPattern =
+      RegExp(r'^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?');
+  static final RegExp _kAndroidIntLiteralPattern = RegExp(
+    r'^(?:0x-?[0-9a-fA-F]+|-?0x[0-9a-fA-F]+|-?[0-9]+)$',
+  );
+  static const Map<String, String> _kFrameworkColorFallback = {
+    // android:color/black
+    '0x0106000c': '#ff000000',
+  };
+
+  final BinaryXmlDecompressor _binaryXmlDecompressor = BinaryXmlDecompressor();
+  _ResourceTable? _resourceTable;
+  List<String>? _zipFiles;
+  final Map<String, Image> _bitmapCache = {};
+  final Set<String> _failedBitmapPath = {};
+  bool _didDraw = false;
+  int _drawFillCount = 0;
+  int _drawStrokeCount = 0;
+  int _drawRectCount = 0;
+  int _drawBitmapCount = 0;
+  int _vectorPathTotal = 0;
+  int _vectorPathFilled = 0;
+  int _vectorPathStroked = 0;
+  int _resolvedRefCount = 0;
+
+  Future<Image?> render(String iconPath) async {
+    final normalized = _normalizeZipPath(iconPath);
+    if (normalized.isEmpty) return null;
+
+    try {
+      _didDraw = false;
+      _drawFillCount = 0;
+      _drawStrokeCount = 0;
+      _drawRectCount = 0;
+      _drawBitmapCount = 0;
+      _vectorPathTotal = 0;
+      _vectorPathFilled = 0;
+      _vectorPathStroked = 0;
+      _resolvedRefCount = 0;
+      _debug('render start: iconPath=$normalized, apkPath=$apkPath');
+      final recorder = PictureRecorder();
+      final canvas = Canvas(recorder);
+      final rect = Rect.fromLTWH(
+        0,
+        0,
+        _kCanvasSize.toDouble(),
+        _kCanvasSize.toDouble(),
+      );
+      await _renderDrawable(canvas, rect, normalized, 0);
+      if (!_didDraw) {
+        _debug('render end: no drawing happened');
+        return null;
+      }
+      final picture = recorder.endRecording();
+      _debug(
+          'render end: drawn=true fills=$_drawFillCount strokes=$_drawStrokeCount rects=$_drawRectCount bitmaps=$_drawBitmapCount vectorPath(total=$_vectorPathTotal, filled=$_vectorPathFilled, stroked=$_vectorPathStroked) refs=$_resolvedRefCount');
+      return picture.toImage(_kCanvasSize, _kCanvasSize);
+    } catch (e) {
+      log.warning('AdaptiveIconRenderer.render failed: $e');
+      return null;
+    }
+  }
+
+  Future<void> _renderDrawable(
+    Canvas canvas,
+    Rect rect,
+    String source,
+    int depth,
+  ) async {
+    if (depth > _kMaxDepth || source.isEmpty || rect.isEmpty) return;
+    final trimmed = source.trim();
+    if (trimmed.isEmpty) return;
+    if (depth <= 2) {
+      _debug('renderDrawable: depth=$depth source=$trimmed rect=$rect');
+    }
+
+    if (_isColorLiteral(trimmed)) {
+      final color = _parseColor(trimmed);
+      if (color != null) {
+        canvas.drawRect(rect, Paint()..color = color);
+        _didDraw = true;
+        _drawRectCount++;
+        _debug('renderDrawable: solid color=$trimmed');
+      }
+      return;
+    }
+
+    if (_looksLikeZipPath(trimmed)) {
+      await _renderDrawableFile(canvas, rect, trimmed, depth + 1);
+      return;
+    }
+
+    if (!trimmed.startsWith('@')) {
+      final tryPath = _normalizeZipPath(trimmed);
+      if (_looksLikeZipPath(tryPath)) {
+        await _renderDrawableFile(canvas, rect, tryPath, depth + 1);
+      }
+      return;
+    }
+
+    final resolved = await _resolveResourceReference(trimmed, depth + 1);
+    if (resolved == null || resolved == trimmed) return;
+    await _renderDrawable(canvas, rect, resolved, depth + 1);
+  }
+
+  Future<void> _renderDrawableFile(
+    Canvas canvas,
+    Rect rect,
+    String filePath,
+    int depth,
+  ) async {
+    final normalized = _normalizeZipPath(filePath);
+    if (normalized.isEmpty) return;
+
+    if (_isBitmapPath(normalized)) {
+      final image = await _decodeBitmap(normalized);
+      if (image == null) return;
+      final src =
+          Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
+      final dst = _fitContain(src.size, rect);
+      final paint = Paint()..filterQuality = FilterQuality.high;
+      canvas.drawImageRect(image, src, dst, paint);
+      _didDraw = true;
+      _drawBitmapCount++;
+      _debug(
+          'renderDrawableFile: bitmap=$normalized image=${image.width}x${image.height} dst=$dst');
+      return;
+    }
+
+    if (!normalized.toLowerCase().endsWith('.xml')) {
+      final genericBitmap = await _decodeBitmap(normalized);
+      if (genericBitmap != null) {
+        final src = Rect.fromLTWH(
+          0,
+          0,
+          genericBitmap.width.toDouble(),
+          genericBitmap.height.toDouble(),
+        );
+        final dst = _fitContain(src.size, rect);
+        final paint = Paint()..filterQuality = FilterQuality.high;
+        canvas.drawImageRect(genericBitmap, src, dst, paint);
+        _didDraw = true;
+        _drawBitmapCount++;
+        _debug(
+            'renderDrawableFile: generic bitmap=$normalized image=${genericBitmap.width}x${genericBitmap.height} dst=$dst');
+        return;
+      }
+      return;
+    }
+    final root = await _loadXmlRoot(normalized);
+    if (root == null) return;
+    _debug('renderDrawableFile: xml=$normalized root=<${root.name.local}>');
+    await _renderXmlDrawableElement(canvas, rect, root, depth + 1);
+  }
+
+  Future<void> _renderXmlDrawableElement(
+    Canvas canvas,
+    Rect rect,
+    xml.XmlElement root,
+    int depth,
+  ) async {
+    final tag = root.name.local.toLowerCase();
+    if (depth <= 3) {
+      _debug('renderXml: depth=$depth tag=$tag rect=$rect');
+    }
+    switch (tag) {
+      case 'adaptive-icon':
+      case 'monochrome':
+        await _renderAdaptiveIcon(canvas, rect, root, depth + 1);
+        return;
+      case 'vector':
+        await _renderVectorDrawable(canvas, rect, root, depth + 1);
+        return;
+      case 'layer-list':
+        await _renderLayerList(canvas, rect, root, depth + 1);
+        return;
+      case 'inset':
+        await _renderInsetDrawable(canvas, rect, root, depth + 1);
+        return;
+      case 'shape':
+        await _renderShapeDrawable(canvas, rect, root, depth + 1);
+        return;
+      case 'bitmap':
+        await _renderBitmapDrawable(canvas, rect, root, depth + 1);
+        return;
+      case 'selector':
+        await _renderSelectorDrawable(canvas, rect, root, depth + 1);
+        return;
+      default:
+        final drawable = _attr(root, 'drawable');
+        if (drawable != null) {
+          await _renderDrawable(canvas, rect, drawable, depth + 1);
+          return;
+        }
+        final child = _firstElementChild(root);
+        if (child != null) {
+          await _renderXmlDrawableElement(canvas, rect, child, depth + 1);
+        }
+    }
+  }
+
+  Future<void> _renderAdaptiveIcon(
+    Canvas canvas,
+    Rect rect,
+    xml.XmlElement root,
+    int depth,
+  ) async {
+    final background = _findDirectChild(root, 'background');
+    final foreground = _findDirectChild(root, 'foreground');
+    final monochrome = _findDirectChild(root, 'monochrome');
+    _debug(
+        'adaptive-icon: hasBg=${background != null} hasFg=${foreground != null} hasMono=${monochrome != null} bgDrawable=${_attr(background, 'drawable')} fgDrawable=${_attr(foreground, 'drawable')} monoDrawable=${_attr(monochrome, 'drawable')}');
+
+    // Android launchers apply a mask to adaptive icons. The exact mask shape is
+    // launcher-dependent, so we use a rounded-rect default for preview.
+    canvas.save();
+    canvas.clipPath(_defaultAdaptiveMask(rect));
+    _debug('adaptive-icon: applied default rounded mask');
+    final scaleTarget = foreground ?? monochrome;
+    final foregroundScale =
+        await _resolveAdaptiveForegroundScale(scaleTarget, depth + 1);
+    final foregroundRect = _scaleRectAroundCenter(rect, foregroundScale);
+    _debug(
+        'adaptive-icon: foregroundScale=$foregroundScale (bitmap=$_kAdaptiveForegroundScaleBitmap vector=$_kAdaptiveForegroundScaleVector)');
+
+    if (background != null) {
+      await _renderDrawableContainer(canvas, rect, background, depth + 1);
+    }
+    if (foreground != null) {
+      await _renderDrawableContainer(
+          canvas, foregroundRect, foreground, depth + 1);
+    } else if (monochrome != null) {
+      await _renderDrawableContainer(
+          canvas, foregroundRect, monochrome, depth + 1);
+    }
+    canvas.restore();
+  }
+
+  Future<double> _resolveAdaptiveForegroundScale(
+    xml.XmlElement? container,
+    int depth,
+  ) async {
+    if (container == null || depth > _kMaxDepth) {
+      return _kAdaptiveForegroundScaleBitmap;
+    }
+    final raw = (_attr(container, 'drawable')?.trim().isNotEmpty ?? false)
+        ? _attr(container, 'drawable')!.trim()
+        : _findDrawableLikeValue(container);
+    if (raw == null || raw.isEmpty) {
+      return _kAdaptiveForegroundScaleBitmap;
+    }
+    final resolved = await _resolveDrawableToPath(raw, depth + 1);
+    if (resolved == null || resolved.isEmpty) {
+      return _kAdaptiveForegroundScaleBitmap;
+    }
+    if (resolved.toLowerCase().endsWith('.xml')) {
+      final root = await _loadXmlRoot(resolved);
+      final tag = root?.name.local.toLowerCase();
+      if (tag == 'vector') {
+        return _kAdaptiveForegroundScaleVector;
+      }
+    }
+    return _kAdaptiveForegroundScaleBitmap;
+  }
+
+  Future<String?> _resolveDrawableToPath(String value, int depth) async {
+    if (depth > _kMaxDepth) return null;
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    if (_looksLikeZipPath(trimmed)) {
+      return _normalizeZipPath(trimmed);
+    }
+    if (!trimmed.startsWith('@')) {
+      return null;
+    }
+    return _resolveResourceReference(trimmed, depth + 1);
+  }
+
+  Future<void> _renderDrawableContainer(
+    Canvas canvas,
+    Rect rect,
+    xml.XmlElement container,
+    int depth,
+  ) async {
+    final drawable = _attr(container, 'drawable');
+    if (drawable != null && drawable.isNotEmpty) {
+      await _renderDrawable(canvas, rect, drawable, depth + 1);
+      return;
+    }
+
+    final fallbackDrawable = _findDrawableLikeValue(container);
+    if (fallbackDrawable != null) {
+      _debug(
+          'renderDrawableContainer: fallback drawable value=$fallbackDrawable tag=<${container.name.local}>');
+      await _renderDrawable(canvas, rect, fallbackDrawable, depth + 1);
+      return;
+    }
+
+    final child = _firstElementChild(container);
+    if (child != null) {
+      await _renderXmlDrawableElement(canvas, rect, child, depth + 1);
+    } else {
+      _debug(
+          'renderDrawableContainer: no drawable/child tag=<${container.name.local}> attrs=${container.attributes.map((a) => '${a.name.qualified}=${a.value}').join(",")}');
+    }
+  }
+
+  Future<void> _renderLayerList(
+    Canvas canvas,
+    Rect rect,
+    xml.XmlElement root,
+    int depth,
+  ) async {
+    for (final item
+        in root.childElements.where((e) => e.name.local == 'item')) {
+      final inset = _parseInsets(item);
+      final inner = Rect.fromLTRB(
+        rect.left + inset.left,
+        rect.top + inset.top,
+        rect.right - inset.right,
+        rect.bottom - inset.bottom,
+      );
+      if (inner.isEmpty) continue;
+      await _renderDrawableContainer(canvas, inner, item, depth + 1);
+    }
+  }
+
+  Future<void> _renderInsetDrawable(
+    Canvas canvas,
+    Rect rect,
+    xml.XmlElement root,
+    int depth,
+  ) async {
+    final inset = _parseInsets(root);
+    final inner = Rect.fromLTRB(
+      rect.left + inset.left,
+      rect.top + inset.top,
+      rect.right - inset.right,
+      rect.bottom - inset.bottom,
+    );
+    if (inner.isEmpty) return;
+    await _renderDrawableContainer(canvas, inner, root, depth + 1);
+  }
+
+  Future<void> _renderBitmapDrawable(
+    Canvas canvas,
+    Rect rect,
+    xml.XmlElement root,
+    int depth,
+  ) async {
+    final source = _attr(root, 'src') ?? _attr(root, 'drawable');
+    if (source == null || source.isEmpty) return;
+    await _renderDrawable(canvas, rect, source, depth + 1);
+  }
+
+  Future<void> _renderSelectorDrawable(
+    Canvas canvas,
+    Rect rect,
+    xml.XmlElement root,
+    int depth,
+  ) async {
+    final item = _findDirectChild(root, 'item');
+    if (item == null) return;
+    await _renderDrawableContainer(canvas, rect, item, depth + 1);
+  }
+
+  Future<void> _renderShapeDrawable(
+    Canvas canvas,
+    Rect rect,
+    xml.XmlElement root,
+    int depth,
+  ) async {
+    final shapeType = (_attr(root, 'shape') ?? 'rectangle').toLowerCase();
+    final solid = _findDirectChild(root, 'solid');
+    final gradient = _findDirectChild(root, 'gradient');
+    final stroke = _findDirectChild(root, 'stroke');
+    final corners = _findDirectChild(root, 'corners');
+
+    final fillColor = await _resolveColorRef(
+      solid == null ? null : _attr(solid, 'color'),
+      depth + 1,
+    );
+    final fillGradient = gradient == null
+        ? null
+        : await _buildGradientFromElement(gradient, rect, depth + 1);
+    _debug(
+        'shape: type=$shapeType solid=${solid == null ? null : _attr(solid, 'color')} resolvedFill=$fillColor hasGradient=${fillGradient != null} stroke=${stroke == null ? null : _attr(stroke, 'color')}');
+
+    if (fillColor != null || fillGradient != null) {
+      final fillPaint = Paint();
+      if (fillGradient != null) {
+        fillPaint.shader = fillGradient;
+      } else {
+        fillPaint.color = fillColor!;
+      }
+      if (shapeType == 'oval') {
+        canvas.drawOval(rect, fillPaint);
+        _didDraw = true;
+        _drawFillCount++;
+      } else {
+        final radius = _parseDimension(_attr(corners, 'radius'));
+        if (radius > 0) {
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(rect, Radius.circular(radius)),
+            fillPaint,
+          );
+          _didDraw = true;
+          _drawFillCount++;
+        } else {
+          canvas.drawRect(rect, fillPaint);
+          _didDraw = true;
+          _drawRectCount++;
+        }
+      }
+    }
+
+    if (stroke != null) {
+      final strokeColor =
+          await _resolveColorRef(_attr(stroke, 'color'), depth + 1);
+      final strokeWidth = _parseDimension(_attr(stroke, 'width'));
+      if (strokeColor != null && strokeWidth > 0) {
+        final paint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = strokeWidth
+          ..color = strokeColor;
+        if (shapeType == 'oval') {
+          canvas.drawOval(rect.deflate(strokeWidth / 2), paint);
+          _didDraw = true;
+          _drawStrokeCount++;
+        } else {
+          final radius = _parseDimension(_attr(corners, 'radius'));
+          if (radius > 0) {
+            canvas.drawRRect(
+              RRect.fromRectAndRadius(
+                rect.deflate(strokeWidth / 2),
+                Radius.circular(math.max(radius - strokeWidth / 2, 0)),
+              ),
+              paint,
+            );
+            _didDraw = true;
+            _drawStrokeCount++;
+          } else {
+            canvas.drawRect(rect.deflate(strokeWidth / 2), paint);
+            _didDraw = true;
+            _drawStrokeCount++;
+          }
+        }
+      }
+    }
+  }
+
+  Future<void> _renderVectorDrawable(
+    Canvas canvas,
+    Rect rect,
+    xml.XmlElement vector,
+    int depth,
+  ) async {
+    final viewportWidth = _parseDimension(_attr(vector, 'viewportWidth'));
+    final viewportHeight = _parseDimension(_attr(vector, 'viewportHeight'));
+    final width = viewportWidth > 0
+        ? viewportWidth
+        : math.max(_parseDimension(_attr(vector, 'width')), 1);
+    final height = viewportHeight > 0
+        ? viewportHeight
+        : math.max(_parseDimension(_attr(vector, 'height')), 1);
+    final vw = viewportWidth > 0 ? viewportWidth : width;
+    final vh = viewportHeight > 0 ? viewportHeight : height;
+    if (vw <= 0 || vh <= 0) return;
+    final vectorAlpha =
+        _parseDimension(_attr(vector, 'alpha'), fallback: 1).clamp(0.0, 1.0);
+    final tint = _attr(vector, 'tint');
+    final tintMode = _attr(vector, 'tintMode');
+    _debug(
+        'vector: viewport=($vw,$vh) width=$width height=$height alpha=$vectorAlpha tint=$tint tintMode=$tintMode childCount=${vector.childElements.length}');
+
+    canvas.save();
+    canvas.translate(rect.left, rect.top);
+    canvas.scale(rect.width / vw, rect.height / vh);
+    await _renderVectorChildren(
+      canvas,
+      vector.childElements,
+      depth + 1,
+      vectorAlpha,
+    );
+    canvas.restore();
+  }
+
+  Future<void> _renderVectorChildren(
+    Canvas canvas,
+    Iterable<xml.XmlElement> elements,
+    int depth,
+    double inheritedAlpha,
+  ) async {
+    for (final child in elements) {
+      final tag = child.name.local.toLowerCase();
+      if (tag == 'group') {
+        await _renderVectorGroup(
+          canvas,
+          child,
+          depth + 1,
+          inheritedAlpha,
+        );
+      } else if (tag == 'path') {
+        await _renderVectorPath(
+          canvas,
+          child,
+          depth + 1,
+          inheritedAlpha,
+        );
+      } else if (tag == 'clip-path') {
+        final pathData = _attr(child, 'pathData');
+        if (pathData == null || pathData.isEmpty) continue;
+        try {
+          final path = parseSvgPathData(pathData);
+          canvas.clipPath(path);
+        } catch (_) {
+          // Ignore invalid clip paths.
+        }
+      }
+    }
+  }
+
+  Future<void> _renderVectorGroup(
+    Canvas canvas,
+    xml.XmlElement group,
+    int depth,
+    double inheritedAlpha,
+  ) async {
+    final rotation = _parseDimension(_attr(group, 'rotation'));
+    final pivotX = _parseDimension(_attr(group, 'pivotX'));
+    final pivotY = _parseDimension(_attr(group, 'pivotY'));
+    final scaleX = _parseDimension(_attr(group, 'scaleX'), fallback: 1);
+    final scaleY = _parseDimension(_attr(group, 'scaleY'), fallback: 1);
+    final translateX = _parseDimension(_attr(group, 'translateX'));
+    final translateY = _parseDimension(_attr(group, 'translateY'));
+    final groupAlpha =
+        _parseDimension(_attr(group, 'alpha'), fallback: 1).clamp(0.0, 1.0);
+    final combinedAlpha = (inheritedAlpha * groupAlpha).clamp(0.0, 1.0);
+    if (depth <= 3) {
+      _debug(
+          'vector.group: rotation=$rotation pivot=($pivotX,$pivotY) scale=($scaleX,$scaleY) translate=($translateX,$translateY) alpha=$groupAlpha inherited=$inheritedAlpha combined=$combinedAlpha');
+    }
+
+    canvas.save();
+    canvas.translate(translateX, translateY);
+    canvas.translate(pivotX, pivotY);
+    canvas.rotate(rotation * math.pi / 180.0);
+    canvas.scale(scaleX, scaleY);
+    canvas.translate(-pivotX, -pivotY);
+    await _renderVectorChildren(
+      canvas,
+      group.childElements,
+      depth + 1,
+      combinedAlpha,
+    );
+    canvas.restore();
+  }
+
+  Future<void> _renderVectorPath(
+    Canvas canvas,
+    xml.XmlElement element,
+    int depth,
+    double inheritedAlpha,
+  ) async {
+    final pathData = _attr(element, 'pathData');
+    if (pathData == null || pathData.isEmpty) return;
+
+    Path path;
+    try {
+      path = parseSvgPathData(pathData);
+    } catch (_) {
+      return;
+    }
+
+    final fillType = (_attr(element, 'fillType') ?? '').trim().toLowerCase();
+    if (fillType == 'evenodd' || fillType == '1' || fillType == '0x1') {
+      path.fillType = PathFillType.evenOdd;
+    } else if (fillType == 'nonzero' || fillType == '0' || fillType == '0x0') {
+      path.fillType = PathFillType.nonZero;
+    }
+    final trimStart = _parseDimension(_attr(element, 'trimPathStart'));
+    final trimEnd = _parseDimension(_attr(element, 'trimPathEnd'), fallback: 1);
+    final trimOffset = _parseDimension(_attr(element, 'trimPathOffset'));
+    if ((trimStart - 0).abs() > 1e-6 ||
+        (trimEnd - 1).abs() > 1e-6 ||
+        trimOffset.abs() > 1e-6) {
+      path = _applyTrimPath(path, trimStart, trimEnd, trimOffset);
+    }
+    _vectorPathTotal++;
+    final pathIndex = _vectorPathTotal;
+
+    final fillRaw = _attr(element, 'fillColor');
+    final fillAlpha =
+        (_parseDimension(_attr(element, 'fillAlpha'), fallback: 1) *
+                inheritedAlpha)
+            .clamp(0.0, 1.0);
+    final resolvedFill = await _resolveVectorFill(fillRaw, path, depth + 1);
+    if (resolvedFill != null && fillAlpha > 0) {
+      final paint = Paint()..style = PaintingStyle.fill;
+      if (resolvedFill.color != null) {
+        paint.color = _applyAlpha(resolvedFill.color!, fillAlpha);
+      } else if (resolvedFill.shader != null) {
+        paint.shader = resolvedFill.shader;
+        if (fillAlpha < 1.0) {
+          paint.colorFilter = ColorFilter.mode(
+            Color.fromARGB(
+                (fillAlpha * 255).round().clamp(0, 255), 255, 255, 255),
+            BlendMode.modulate,
+          );
+        }
+      }
+      canvas.drawPath(path, paint);
+      _didDraw = true;
+      _drawFillCount++;
+      _vectorPathFilled++;
+    }
+
+    final strokeColor = await _resolveColorRef(
+      _attr(element, 'strokeColor'),
+      depth + 1,
+    );
+    final strokeWidth = _parseDimension(_attr(element, 'strokeWidth'));
+    final strokeAlpha =
+        (_parseDimension(_attr(element, 'strokeAlpha'), fallback: 1) *
+                inheritedAlpha)
+            .clamp(0.0, 1.0);
+    if (strokeColor != null && strokeWidth > 0 && strokeAlpha > 0) {
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeWidth
+        ..color = _applyAlpha(strokeColor, strokeAlpha);
+      final cap = (_attr(element, 'strokeLineCap') ?? '').toLowerCase();
+      if (cap == 'round') paint.strokeCap = StrokeCap.round;
+      if (cap == 'square') paint.strokeCap = StrokeCap.square;
+      final join = (_attr(element, 'strokeLineJoin') ?? '').toLowerCase();
+      if (join == 'round') paint.strokeJoin = StrokeJoin.round;
+      if (join == 'bevel') paint.strokeJoin = StrokeJoin.bevel;
+      final miter = _parseDimension(_attr(element, 'strokeMiterLimit'));
+      if (miter > 0) paint.strokeMiterLimit = miter;
+      canvas.drawPath(path, paint);
+      _didDraw = true;
+      _drawStrokeCount++;
+      _vectorPathStroked++;
+    }
+    if (pathIndex <= 20) {
+      _debug(
+          'vector.path#$pathIndex: fillRaw=$fillRaw fillResolved=${resolvedFill?.debugLabel} fillAlpha=$fillAlpha inheritedAlpha=$inheritedAlpha fillType=$fillType trim=($trimStart,$trimEnd,$trimOffset) strokeRaw=${_attr(element, 'strokeColor')} strokeResolved=$strokeColor strokeAlpha=$strokeAlpha strokeWidth=$strokeWidth');
+    }
+  }
+
+  Future<_ResolvedVectorFill?> _resolveVectorFill(
+    String? rawValue,
+    Path path,
+    int depth,
+  ) async {
+    if (rawValue == null || rawValue.isEmpty || depth > _kMaxDepth) return null;
+
+    final directColor = await _resolveColorRef(rawValue, depth + 1);
+    if (directColor != null) {
+      return _ResolvedVectorFill(
+        color: directColor,
+        debugLabel: 'color:$directColor',
+      );
+    }
+
+    final trimmed = rawValue.trim();
+    if (!trimmed.startsWith('@')) return null;
+
+    final resolved = await _resolveResourceReference(trimmed, depth + 1);
+    if (resolved == null || resolved == trimmed) return null;
+
+    if (resolved.toLowerCase().endsWith('.xml')) {
+      final gradient = await _resolveGradientFromXml(
+        resolved,
+        path.getBounds(),
+        depth + 1,
+      );
+      if (gradient != null) {
+        return _ResolvedVectorFill(
+          shader: gradient,
+          debugLabel: 'gradient:$resolved',
+        );
+      }
+      final xmlColor = await _resolveColorFromXml(resolved, depth + 1);
+      if (xmlColor != null) {
+        return _ResolvedVectorFill(
+          color: xmlColor,
+          debugLabel: 'xml-color:$resolved->$xmlColor',
+        );
+      }
+    }
+
+    final finalColor = await _resolveColorRef(resolved, depth + 1);
+    if (finalColor != null) {
+      return _ResolvedVectorFill(
+        color: finalColor,
+        debugLabel: 'ref-color:$resolved->$finalColor',
+      );
+    }
+    return null;
+  }
+
+  Future<Gradient?> _resolveGradientFromXml(
+    String filePath,
+    Rect pathBounds,
+    int depth,
+  ) async {
+    if (depth > _kMaxDepth) return null;
+    final root = await _loadXmlRoot(filePath);
+    if (root == null) return null;
+    if (root.name.local.toLowerCase() != 'gradient') return null;
+    return _buildGradientFromElement(root, pathBounds, depth + 1);
+  }
+
+  Future<Gradient?> _buildGradientFromElement(
+    xml.XmlElement root,
+    Rect pathBounds,
+    int depth,
+  ) async {
+    if (depth > _kMaxDepth) return null;
+    final gradientType = (_attr(root, 'type') ?? 'linear').toLowerCase();
+    final colors = <Color>[];
+    final offsets = <double>[];
+
+    for (final item
+        in root.childElements.where((e) => e.name.local == 'item')) {
+      final colorValue = _attr(item, 'color');
+      final color = await _resolveColorRef(colorValue, depth + 1);
+      if (color == null) continue;
+      colors.add(color);
+      offsets.add(_parseDimension(_attr(item, 'offset')));
+    }
+
+    if (colors.isEmpty) {
+      final startColor =
+          await _resolveColorRef(_attr(root, 'startColor'), depth + 1);
+      final centerColor =
+          await _resolveColorRef(_attr(root, 'centerColor'), depth + 1);
+      final endColor =
+          await _resolveColorRef(_attr(root, 'endColor'), depth + 1);
+      if (startColor != null && endColor != null) {
+        colors.add(startColor);
+        offsets.add(0);
+        if (centerColor != null) {
+          colors.add(centerColor);
+          offsets.add(0.5);
+        }
+        colors.add(endColor);
+        offsets.add(1);
+      }
+    }
+
+    if (colors.length < 2) return null;
+    final normalizedOffsets = _normalizeGradientStops(offsets, colors.length);
+    final tileMode = _parseTileMode(_attr(root, 'tileMode'));
+
+    final type = _parseGradientType(gradientType);
+    if (type == _GradientType.radial) {
+      final center = Offset(
+        _parseDimension(_attr(root, 'centerX'),
+            fallback: pathBounds.isEmpty ? 0 : pathBounds.center.dx),
+        _parseDimension(_attr(root, 'centerY'),
+            fallback: pathBounds.isEmpty ? 0 : pathBounds.center.dy),
+      );
+      final radius = _parseDimension(
+        _attr(root, 'gradientRadius'),
+        fallback: pathBounds.isEmpty
+            ? 1
+            : math.max(pathBounds.width, pathBounds.height) / 2,
+      );
+      _debug(
+          'gradient(radial): center=$center radius=$radius tileMode=$tileMode stops=${normalizedOffsets ?? offsets}');
+      return Gradient.radial(
+        center,
+        radius,
+        colors,
+        normalizedOffsets,
+        tileMode,
+      );
+    }
+    if (type == _GradientType.sweep) {
+      final center = Offset(
+        _parseDimension(_attr(root, 'centerX'),
+            fallback: pathBounds.isEmpty ? 0 : pathBounds.center.dx),
+        _parseDimension(_attr(root, 'centerY'),
+            fallback: pathBounds.isEmpty ? 0 : pathBounds.center.dy),
+      );
+      _debug(
+          'gradient(sweep): center=$center tileMode=$tileMode stops=${normalizedOffsets ?? offsets}');
+      return Gradient.sweep(
+        center,
+        colors,
+        normalizedOffsets,
+        tileMode,
+      );
+    }
+
+    var start = Offset(
+      _parseDimension(_attr(root, 'startX'),
+          fallback: pathBounds.isEmpty ? 0 : pathBounds.left),
+      _parseDimension(_attr(root, 'startY'),
+          fallback: pathBounds.isEmpty ? 0 : pathBounds.top),
+    );
+    var end = Offset(
+      _parseDimension(_attr(root, 'endX'),
+          fallback: pathBounds.isEmpty ? 1 : pathBounds.right),
+      _parseDimension(_attr(root, 'endY'),
+          fallback: pathBounds.isEmpty ? 0 : pathBounds.bottom),
+    );
+    if ((start - end).distanceSquared == 0 && !pathBounds.isEmpty) {
+      final angle = _parseDimension(_attr(root, 'angle'));
+      final rad = angle * math.pi / 180.0;
+      final half = math.max(pathBounds.width, pathBounds.height) * 0.5;
+      final center = pathBounds.center;
+      final dir = Offset(math.cos(rad), math.sin(rad));
+      start = center - dir * half;
+      end = center + dir * half;
+    }
+    _debug(
+        'gradient(linear): start=$start end=$end tileMode=$tileMode stops=${normalizedOffsets ?? offsets}');
+    return Gradient.linear(start, end, colors, normalizedOffsets, tileMode);
+  }
+
+  Future<Color?> _resolveColorRef(String? value, int depth) async {
+    if (value == null || value.isEmpty || depth > _kMaxDepth) return null;
+    final trimmed = value.trim();
+    if (_isColorLiteral(trimmed)) {
+      return _parseColor(trimmed);
+    }
+    if (_isAndroidIntLiteral(trimmed)) {
+      final parsed = _parseAndroidColorInt(trimmed);
+      if (parsed != null && depth <= 4) {
+        _debug('resolveColorRef(int): $trimmed -> $parsed');
+      }
+      return parsed;
+    }
+
+    if (!trimmed.startsWith('@')) return null;
+    final resolved = await _resolveResourceReference(trimmed, depth + 1);
+    if (resolved == null || resolved == trimmed) return null;
+    if (depth <= 4) {
+      _debug('resolveColorRef: $trimmed -> $resolved');
+    }
+    if (resolved.toLowerCase().endsWith('.xml')) {
+      final xmlColor = await _resolveColorFromXml(resolved, depth + 1);
+      if (xmlColor != null) {
+        _debug('resolveColorRef(xml): $resolved -> $xmlColor');
+        return xmlColor;
+      }
+    }
+    return _resolveColorRef(resolved, depth + 1);
+  }
+
+  Future<String?> _resolveResourceReference(String reference, int depth) async {
+    if (depth > _kMaxDepth) return null;
+    final trimmed = reference.trim();
+    if (trimmed.isEmpty) return null;
+    if (_isColorLiteral(trimmed) || _looksLikeZipPath(trimmed)) return trimmed;
+
+    final table = await _loadResourceTable();
+    if (table == null) return null;
+
+    final idMatch = _kResourceIdPattern.firstMatch(trimmed);
+    if (idMatch != null) {
+      final id = _normalizeResourceId(idMatch.group(1)!);
+      final entry = table.byId[id];
+      final resolved = _resolveEntryValue(entry);
+      final withFallback = resolved ?? _resolveFrameworkReference(id);
+      _resolvedRefCount++;
+      if (_resolvedRefCount <= 80) {
+        _debug(
+            'resolveRef(id): $trimmed -> $withFallback entryName=${entry?.name} files=${entry?.filePaths.length ?? 0} colors=${entry?.colors.length ?? 0} refs=${entry?.references.length ?? 0}');
+      }
+      return withFallback;
+    }
+
+    final nameMatch = _kNamedResourcePattern.firstMatch(trimmed);
+    if (nameMatch != null) {
+      final nameKey =
+          '${nameMatch.group(1)!.toLowerCase()}/${nameMatch.group(2)!.toLowerCase()}';
+      final entries = table.byName[nameKey];
+      if (entries == null || entries.isEmpty) return null;
+      final picked = _pickBestEntry(entries);
+      final resolved = _resolveEntryValue(picked);
+      _resolvedRefCount++;
+      if (_resolvedRefCount <= 80) {
+        _debug(
+            'resolveRef(name): $trimmed -> $resolved pick=${picked.name} files=${picked.filePaths.length} colors=${picked.colors.length} refs=${picked.references.length}');
+      }
+      return resolved;
+    }
+    return null;
+  }
+
+  String? _resolveEntryValue(_ResourceEntry? entry) {
+    if (entry == null) return null;
+    if (entry.filePaths.isNotEmpty) {
+      return _pickBestFilePath(entry.filePaths);
+    }
+    if (entry.colors.isNotEmpty) {
+      return entry.colors.first;
+    }
+    if (entry.references.isNotEmpty) {
+      return entry.references.first;
+    }
+    return null;
+  }
+
+  _ResourceEntry _pickBestEntry(List<_ResourceEntry> entries) {
+    final sorted = [...entries];
+    sorted.sort((a, b) => _entryScore(b).compareTo(_entryScore(a)));
+    return sorted.first;
+  }
+
+  int _entryScore(_ResourceEntry entry) {
+    if (entry.filePaths.isNotEmpty) {
+      return _fileScore(_pickBestFilePath(entry.filePaths));
+    }
+    if (entry.colors.isNotEmpty) return 10;
+    if (entry.references.isNotEmpty) return 5;
+    return 0;
+  }
+
+  String _pickBestFilePath(List<String> filePaths) {
+    final sorted = filePaths.toSet().toList();
+    sorted.sort((a, b) => _fileScore(b).compareTo(_fileScore(a)));
+    return sorted.first;
+  }
+
+  int _fileScore(String path) {
+    final lower = path.toLowerCase();
+    var score = 0;
+    final hasExtension =
+        lower.contains('.') && lower.lastIndexOf('/') < lower.lastIndexOf('.');
+    final isXml = lower.endsWith('.xml');
+    if (!isXml &&
+        (lower.endsWith('.png') ||
+            lower.endsWith('.webp') ||
+            lower.endsWith('.jpg') ||
+            lower.endsWith('.jpeg'))) {
+      score += 420;
+    } else if (!isXml && !hasExtension) {
+      score += 360;
+    } else if (isXml) {
+      score += 180;
+    }
+    if (lower.contains('anydpi-v26')) {
+      score += isXml ? 20 : 160;
+    } else if (lower.contains('anydpi')) {
+      score += isXml ? 15 : 120;
+    }
+    final density = _kDensityPattern.firstMatch(lower)?.group(1);
+    const densityScore = <String, int>{
+      'xxxhdpi': 70,
+      'xxhdpi': 65,
+      'xhdpi': 60,
+      'hdpi': 55,
+      'mdpi': 50,
+      'ldpi': 45,
+    };
+    if (density != null) score += densityScore[density] ?? 0;
+    return score;
+  }
+
+  String? _resolveFrameworkReference(String id) {
+    final normalized = _normalizeResourceId(id);
+    if (!normalized.startsWith('0x01')) return null;
+    return _kFrameworkColorFallback[normalized];
+  }
+
+  Future<_ResourceTable?> _loadResourceTable() async {
+    if (_resourceTable != null) return _resourceTable;
+    try {
+      final result = await Process.run(
+        aaptPath,
+        ['dump', 'resources', apkPath],
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
+      ).timeout(const Duration(seconds: 120));
+      if (result.exitCode != 0) {
+        log.warning('aapt2 dump resources failed: ${result.stderr}');
+        return null;
+      }
+      _resourceTable = _parseResourceTable(result.stdout.toString());
+      _debug(
+          'resourceTable loaded: byId=${_resourceTable!.byId.length}, byName=${_resourceTable!.byName.length}');
+      return _resourceTable;
+    } catch (e) {
+      log.warning('loadResourceTable failed: $e');
+      return null;
+    }
+  }
+
+  _ResourceTable _parseResourceTable(String output) {
+    final byId = <String, _ResourceEntry>{};
+    final byName = <String, List<_ResourceEntry>>{};
+    _ResourceEntry? current;
+
+    for (final rawLine in output.split('\n')) {
+      final line = rawLine.trimRight();
+      final resourceMatch = _kResourceLinePattern.firstMatch(line);
+      if (resourceMatch != null) {
+        final id = _normalizeResourceId(resourceMatch.group(1)!);
+        final name = resourceMatch.group(2)!.trim().toLowerCase();
+        current =
+            byId.putIfAbsent(id, () => _ResourceEntry(id: id, name: name));
+        current.name = name;
+        byName.putIfAbsent(name, () => []).add(current);
+        continue;
+      }
+      if (current == null) continue;
+
+      for (final m in _kResourceFilePattern.allMatches(line)) {
+        current.filePaths.add(_normalizeZipPath(m.group(1)!));
+      }
+      for (final m in _kResourceColorPattern.allMatches(line)) {
+        current.colors.add(m.group(0)!.toLowerCase());
+      }
+      for (final m in _kResourceRefPattern.allMatches(line)) {
+        final raw = m.group(1)!;
+        if (raw.toLowerCase().startsWith('0x')) {
+          current.references.add('@${_normalizeResourceId(raw)}');
+        } else {
+          current.references.add('@${raw.toLowerCase()}');
+        }
+      }
+    }
+
+    for (final entry in byId.values) {
+      entry.filePaths = entry.filePaths.toSet().toList();
+      entry.colors = entry.colors.toSet().toList();
+      entry.references = entry.references.toSet().toList();
+    }
+    return _ResourceTable(byId: byId, byName: byName);
+  }
+
+  Future<Image?> _decodeBitmap(String path) async {
+    final normalized = _normalizeZipPath(path);
+    if (_bitmapCache.containsKey(normalized)) return _bitmapCache[normalized];
+    if (_failedBitmapPath.contains(normalized)) return null;
+
+    final bytes = await _readZipFile(normalized);
+    if (bytes == null || bytes.isEmpty) {
+      _failedBitmapPath.add(normalized);
+      return null;
+    }
+
+    try {
+      final codec = await instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      _bitmapCache[normalized] = frame.image;
+      return frame.image;
+    } catch (e) {
+      _failedBitmapPath.add(normalized);
+      log.fine('decodeBitmap failed: $normalized, $e');
+      return null;
+    }
+  }
+
+  Future<xml.XmlElement?> _loadXmlRoot(String filePath) async {
+    final bytes = await _readZipFile(filePath);
+    if (bytes == null || bytes.isEmpty) return null;
+
+    try {
+      final xmlText = _decodeXmlText(bytes);
+      final doc = xml.XmlDocument.parse(xmlText);
+      _debug(
+          'loadXmlRoot success: $filePath root=<${doc.rootElement.name.local}> bytes=${bytes.length}');
+      return doc.rootElement;
+    } catch (e) {
+      final preview =
+          utf8.decode(bytes.take(120).toList(), allowMalformed: true);
+      log.fine(
+          'loadXmlRoot failed: $filePath, $e, preview=${preview.replaceAll('\n', '\\n')}');
+      return null;
+    }
+  }
+
+  String _decodeXmlText(Uint8List bytes) {
+    if (_looksLikeBinaryXml(bytes)) {
+      try {
+        return _binaryXmlDecompressor.decompressXml(bytes);
+      } catch (_) {
+        // Fall back to plain UTF-8 xml parsing for non-standard encodings.
+      }
+    }
+    return utf8.decode(bytes, allowMalformed: true);
+  }
+
+  Future<Color?> _resolveColorFromXml(String filePath, int depth) async {
+    if (depth > _kMaxDepth) return null;
+    final root = await _loadXmlRoot(filePath);
+    if (root == null) return null;
+    final tag = root.name.local.toLowerCase();
+    if (tag == 'selector') {
+      final item = _findDirectChild(root, 'item');
+      final colorAttr = item == null ? null : _attr(item, 'color');
+      if (colorAttr == null || colorAttr.isEmpty) return null;
+      return _resolveColorRef(colorAttr, depth + 1);
+    }
+    if (tag == 'color') {
+      final text = root.innerText.trim();
+      if (_isColorLiteral(text)) {
+        return _parseColor(text);
+      }
+    }
+    return null;
+  }
+
+  _GradientType _parseGradientType(String raw) {
+    final value = raw.trim().toLowerCase();
+    if (value == '1' || value == 'radial') {
+      return _GradientType.radial;
+    }
+    if (value == '2' || value == 'sweep') {
+      return _GradientType.sweep;
+    }
+    return _GradientType.linear;
+  }
+
+  List<double>? _normalizeGradientStops(List<double> offsets, int colorCount) {
+    if (colorCount < 2) return null;
+    if (offsets.length != colorCount) {
+      return null;
+    }
+    final result = <double>[];
+    var needAuto = false;
+    for (final value in offsets) {
+      if (value.isNaN || value < 0 || value > 1) {
+        needAuto = true;
+        break;
+      }
+    }
+    if (needAuto) {
+      return null;
+    }
+    var last = -1.0;
+    for (final value in offsets) {
+      final clamped = value.clamp(0.0, 1.0);
+      if (clamped < last) {
+        needAuto = true;
+        break;
+      }
+      result.add(clamped);
+      last = clamped;
+    }
+    if (needAuto) {
+      return null;
+    }
+    return result;
+  }
+
+  TileMode _parseTileMode(String? raw) {
+    final value = (raw ?? '').trim().toLowerCase();
+    if (value == '1' || value == 'repeat') {
+      return TileMode.repeated;
+    }
+    if (value == '2' || value == 'mirror') {
+      return TileMode.mirror;
+    }
+    if (value == '3' || value == 'decal') {
+      return TileMode.decal;
+    }
+    return TileMode.clamp;
+  }
+
+  Path _applyTrimPath(
+    Path original,
+    double trimStart,
+    double trimEnd,
+    double trimOffset,
+  ) {
+    if (original.computeMetrics().isEmpty) return original;
+    var start = trimStart + trimOffset;
+    var end = trimEnd + trimOffset;
+    start = start - start.floorToDouble();
+    end = end - end.floorToDouble();
+
+    final metrics = original.computeMetrics().toList();
+    if (metrics.isEmpty) return original;
+    final result = Path();
+
+    void extractRange(PathMetric metric, double from, double to) {
+      final total = metric.length;
+      if (total <= 0) return;
+      final clampedFrom = (from * total).clamp(0.0, total);
+      final clampedTo = (to * total).clamp(0.0, total);
+      if (clampedTo <= clampedFrom) return;
+      result.addPath(
+        metric.extractPath(clampedFrom, clampedTo, startWithMoveTo: true),
+        Offset.zero,
+      );
+    }
+
+    for (final metric in metrics) {
+      if ((start - end).abs() <= 1e-6) {
+        continue;
+      }
+      if (start < end) {
+        extractRange(metric, start, end);
+      } else {
+        extractRange(metric, start, 1);
+        extractRange(metric, 0, end);
+      }
+    }
+
+    return result;
+  }
+
+  bool _looksLikeBinaryXml(Uint8List bytes) {
+    if (bytes.length < 4) return false;
+    final marker =
+        bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
+    return marker == BinaryXmlDecompressor.PACKED_XML_IDENTIFIER;
+  }
+
+  Future<Uint8List?> _readZipFile(String path) async {
+    final normalized = _normalizeZipPath(path);
+    if (normalized.isEmpty) return null;
+
+    final candidates = <String>{
+      normalized,
+      normalized.replaceFirst(RegExp(r'^/'), ''),
+      normalized.startsWith('res/')
+          ? normalized.substring(4)
+          : 'res/$normalized',
+    };
+
+    for (final candidate in candidates) {
+      if (candidate.isEmpty) continue;
+      final data = await zip.readFileContent(candidate);
+      if (data != null && data.isNotEmpty) return data;
+    }
+
+    final allFiles = await _listZipFiles();
+    final lower = normalized.toLowerCase();
+    final match = allFiles.cast<String?>().firstWhere(
+          (f) => f != null && f.toLowerCase() == lower,
+          orElse: () => null,
+        );
+    if (match != null) {
+      return zip.readFileContent(match);
+    }
+    return null;
+  }
+
+  Future<List<String>> _listZipFiles() async {
+    _zipFiles ??= zip.listFiles();
+    return _zipFiles!;
+  }
+
+  String _normalizeZipPath(String value) {
+    var normalized = value.trim().replaceAll('\\', '/');
+    if (normalized.startsWith('file://')) {
+      normalized = normalized.substring('file://'.length);
+    }
+    if (normalized.startsWith('/')) normalized = normalized.substring(1);
+    return normalized;
+  }
+
+  String _normalizeResourceId(String value) {
+    var tmp = value.trim().toLowerCase();
+    if (tmp.startsWith('@')) {
+      tmp = tmp.substring(1);
+    }
+    if (tmp.startsWith('res/')) {
+      tmp = tmp.substring(4);
+    }
+    if (!tmp.startsWith('0x')) {
+      tmp = '0x$tmp';
+    }
+    final parsed = int.tryParse(tmp.substring(2), radix: 16);
+    if (parsed == null) {
+      return tmp;
+    }
+    return '0x${parsed.toRadixString(16).padLeft(8, '0')}';
+  }
+
+  bool _looksLikeZipPath(String value) {
+    final lower = value.toLowerCase();
+    return lower.startsWith('res/') ||
+        lower.endsWith('.xml') ||
+        _isBitmapPath(lower);
+  }
+
+  bool _isBitmapPath(String path) {
+    final lower = path.toLowerCase();
+    return lower.endsWith('.png') ||
+        lower.endsWith('.webp') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg');
+  }
+
+  bool _isColorLiteral(String value) =>
+      _kHexColorPattern.hasMatch(value.trim());
+
+  bool _isAndroidIntLiteral(String value) =>
+      _kAndroidIntLiteralPattern.hasMatch(value.trim());
+
+  Color? _parseColor(String raw) {
+    final value = raw.trim();
+    if (!_kHexColorPattern.hasMatch(value)) return null;
+    final hex = value.substring(1);
+    int a = 255;
+    int r = 0;
+    int g = 0;
+    int b = 0;
+
+    if (hex.length == 3) {
+      r = _hexToByte('${hex[0]}${hex[0]}');
+      g = _hexToByte('${hex[1]}${hex[1]}');
+      b = _hexToByte('${hex[2]}${hex[2]}');
+    } else if (hex.length == 4) {
+      a = _hexToByte('${hex[0]}${hex[0]}');
+      r = _hexToByte('${hex[1]}${hex[1]}');
+      g = _hexToByte('${hex[2]}${hex[2]}');
+      b = _hexToByte('${hex[3]}${hex[3]}');
+    } else if (hex.length == 6) {
+      r = _hexToByte(hex.substring(0, 2));
+      g = _hexToByte(hex.substring(2, 4));
+      b = _hexToByte(hex.substring(4, 6));
+    } else if (hex.length == 8) {
+      a = _hexToByte(hex.substring(0, 2));
+      r = _hexToByte(hex.substring(2, 4));
+      g = _hexToByte(hex.substring(4, 6));
+      b = _hexToByte(hex.substring(6, 8));
+    }
+
+    return Color.fromARGB(a, r, g, b);
+  }
+
+  int _hexToByte(String hex) {
+    return int.tryParse(hex, radix: 16) ?? 0;
+  }
+
+  Color? _parseAndroidColorInt(String raw) {
+    final signed = _parseAndroidIntLiteral(raw.trim());
+    if (signed == null) return null;
+
+    var color = signed & 0xffffffff;
+    if ((color & 0xff000000) == 0 && color <= 0x00ffffff) {
+      color |= 0xff000000;
+    }
+    return Color.fromARGB(
+      (color >> 24) & 0xff,
+      (color >> 16) & 0xff,
+      (color >> 8) & 0xff,
+      color & 0xff,
+    );
+  }
+
+  int? _parseAndroidIntLiteral(String raw) {
+    final value = raw.trim().toLowerCase();
+    if (value.startsWith('0x-')) {
+      final body = value.substring(3);
+      final parsed = int.tryParse(body, radix: 16);
+      if (parsed == null) return null;
+      return -parsed;
+    }
+    if (value.startsWith('-0x')) {
+      final body = value.substring(3);
+      final parsed = int.tryParse(body, radix: 16);
+      if (parsed == null) return null;
+      return -parsed;
+    }
+    if (value.startsWith('0x')) {
+      return int.tryParse(value.substring(2), radix: 16);
+    }
+    return int.tryParse(value);
+  }
+
+  Color _applyAlpha(Color color, double alpha) {
+    final effective = ((color.a * 255.0) * alpha).round().clamp(0, 255);
+    return color.withAlpha(effective);
+  }
+
+  Rect _fitContain(Size source, Rect target) {
+    if (source.width <= 0 || source.height <= 0 || target.isEmpty) {
+      return target;
+    }
+    final scale =
+        math.min(target.width / source.width, target.height / source.height);
+    final width = source.width * scale;
+    final height = source.height * scale;
+    final dx = target.left + (target.width - width) / 2;
+    final dy = target.top + (target.height - height) / 2;
+    return Rect.fromLTWH(dx, dy, width, height);
+  }
+
+  Rect _scaleRectAroundCenter(Rect rect, double scale) {
+    if (scale == 1 || rect.isEmpty) return rect;
+    final cx = rect.center.dx;
+    final cy = rect.center.dy;
+    final width = rect.width * scale;
+    final height = rect.height * scale;
+    return Rect.fromCenter(
+        center: Offset(cx, cy), width: width, height: height);
+  }
+
+  Path _defaultAdaptiveMask(Rect rect) {
+    final size = math.min(rect.width, rect.height);
+    final radius = size * 0.22;
+    return Path()
+      ..addRRect(
+        RRect.fromRectAndRadius(rect, Radius.circular(radius)),
+      );
+  }
+
+  double _parseDimension(String? raw, {double fallback = 0}) {
+    if (raw == null || raw.isEmpty) return fallback;
+    final trimmed = raw.trim();
+    final direct = double.tryParse(trimmed);
+    if (direct != null && direct.isFinite) {
+      return direct;
+    }
+    final match = _kLeadingNumberPattern.firstMatch(trimmed);
+    if (match == null) return fallback;
+    final result = double.tryParse(match.group(0)!);
+    if (result == null || result.isNaN || !result.isFinite) return fallback;
+    return result;
+  }
+
+  _Insets _parseInsets(xml.XmlElement? element) {
+    if (element == null) return _Insets.zero();
+    final inset = _parseDimension(_attr(element, 'inset'));
+    final left = _parseDimension(_attr(element, 'insetLeft'), fallback: inset);
+    final top = _parseDimension(_attr(element, 'insetTop'), fallback: inset);
+    final right =
+        _parseDimension(_attr(element, 'insetRight'), fallback: inset);
+    final bottom =
+        _parseDimension(_attr(element, 'insetBottom'), fallback: inset);
+    return _Insets(left: left, top: top, right: right, bottom: bottom);
+  }
+
+  String? _attr(xml.XmlElement? element, String localName) {
+    if (element == null) return null;
+    for (final attribute in element.attributes) {
+      if (attribute.name.local == localName) {
+        return attribute.value;
+      }
+    }
+    return null;
+  }
+
+  xml.XmlElement? _findDirectChild(xml.XmlElement element, String name) {
+    for (final child in element.childElements) {
+      if (child.name.local.toLowerCase() == name.toLowerCase()) {
+        return child;
+      }
+    }
+    return null;
+  }
+
+  xml.XmlElement? _firstElementChild(xml.XmlElement element) {
+    final iterator = element.childElements.iterator;
+    if (iterator.moveNext()) return iterator.current;
+    return null;
+  }
+
+  String? _findDrawableLikeValue(xml.XmlElement element) {
+    for (final attribute in element.attributes) {
+      final value = attribute.value.trim();
+      if (value.isEmpty) continue;
+      if (value.startsWith('@') ||
+          _looksLikeZipPath(value) ||
+          _isColorLiteral(value) ||
+          _isAndroidIntLiteral(value)) {
+        return value;
+      }
+    }
+    final text = element.innerText.trim();
+    if (text.isNotEmpty &&
+        (text.startsWith('@') ||
+            _looksLikeZipPath(text) ||
+            _isColorLiteral(text) ||
+            _isAndroidIntLiteral(text))) {
+      return text;
+    }
+    return null;
+  }
+
+  void _debug(String message) {
+    log.fine('AdaptiveIconRenderer: $message');
+  }
+}
+
+enum _GradientType { linear, radial, sweep }
+
+class _ResolvedVectorFill {
+  const _ResolvedVectorFill({
+    this.color,
+    this.shader,
+    required this.debugLabel,
+  });
+
+  final Color? color;
+  final Shader? shader;
+  final String debugLabel;
+}
+
+class _ResourceTable {
+  _ResourceTable({
+    required this.byId,
+    required this.byName,
+  });
+
+  final Map<String, _ResourceEntry> byId;
+  final Map<String, List<_ResourceEntry>> byName;
+}
+
+class _ResourceEntry {
+  _ResourceEntry({
+    required this.id,
+    required this.name,
+  });
+
+  final String id;
+  String name;
+  List<String> filePaths = [];
+  List<String> colors = [];
+  List<String> references = [];
+}
+
+class _Insets {
+  _Insets({
+    required this.left,
+    required this.top,
+    required this.right,
+    required this.bottom,
+  });
+
+  final double left;
+  final double top;
+  final double right;
+  final double bottom;
+
+  factory _Insets.zero() => _Insets(left: 0, top: 0, right: 0, bottom: 0);
+}

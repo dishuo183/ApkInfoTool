@@ -45,18 +45,21 @@ class ByteDataReader {
   }
 
   int readInt8() {
+    final value = _data.getInt8(_position);
     _move(1);
-    return _data.getInt8(_position);
+    return value;
   }
 
   int readInt16() {
+    final value = _data.getInt16(_position, _endian);
     _move(2);
-    return _data.getInt16(_position, _endian);
+    return value;
   }
 
   int readInt32() {
+    final value = _data.getInt32(_position, _endian);
     _move(4);
-    return _data.getInt32(_position, _endian);
+    return value;
   }
 
   ByteDataReader skipBytes(int length) {
@@ -66,17 +69,27 @@ class ByteDataReader {
 
   // 从指定位置获取Uint8List, 不会移动position
   Uint8List getUint8List(int offset, int length) {
-    return _data.buffer.asUint8List(offset, length);
+    return _data.buffer.asUint8List(
+      _data.offsetInBytes + offset,
+      length,
+    );
   }
 
   // 从指定位置获取Uint16List, 不会移动position
   Uint16List getUint16List(int offset, int length) {
-    return _data.buffer.asUint16List(offset, length);
+    return _data.buffer.asUint16List(
+      _data.offsetInBytes + offset,
+      length,
+    );
   }
 
   ByteDataReader readFully(Uint8List buffer) {
-    checkPosition(buffer.length);
-    buffer.setAll(0, _data.buffer.asUint8List(_position, buffer.length));
+    checkPosition(_position + buffer.length);
+    buffer.setAll(
+      0,
+      _data.buffer.asUint8List(_data.offsetInBytes + _position, buffer.length),
+    );
+    _move(buffer.length);
     return this;
   }
 
@@ -93,8 +106,10 @@ class ByteDataReader {
   }
 
   Uint8List readUint8List(int length) {
+    checkPosition(_position + length);
+    final bytes =
+        _data.buffer.asUint8List(_data.offsetInBytes + _position, length);
     _move(length);
-    final bytes = _data.buffer.asUint8List(_position, length);
     return bytes;
   }
 }

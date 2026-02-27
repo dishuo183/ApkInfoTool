@@ -2,9 +2,11 @@
 // from: https://github.com/google/android-classyshark/blob/master/ClassySharkWS/src/com/google/classyshark/silverghost/translator/xml/XmlDecompressor.java
 
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:apk_info_tool/utils/byte_data_reader.dart';
+import 'package:apk_info_tool/utils/logger.dart';
 
 class XmlElement {
   String name = "";
@@ -17,7 +19,8 @@ class XmlDocument extends XmlElement {}
 class BinaryXmlDecompressor {
   // Identifiers for XML Chunk Types
   static const int PACKED_XML_IDENTIFIER = 0x00080003;
-  static const int END_DOC_TAG = 0x0101;
+  static const int START_NAMESPACE_TAG = 0x0100;
+  static const int END_NAMESPACE_TAG = 0x0101;
   static const int START_ELEMENT_TAG = 0x0102;
   static const int END_ELEMENT_TAG = 0x0103;
   static const int CDATA_TAG = 0x0104;
@@ -85,32 +88,46 @@ class BinaryXmlDecompressor {
     List<String> packedStrings = parseStrings(reader);
 
     int ident = 0;
-    while (true) {
+    while (reader.remain >= 8) {
+      final chunkStart = reader.position;
       int tag = reader.readInt16();
-      int headerSize = reader.readInt16();
+      reader.readInt16(); // header size, currently unused
       int chunkSize = reader.readInt32();
+      if (chunkSize < 8) {
+        throw FormatException('Invalid chunk size: $chunkSize');
+      }
+      final chunkEnd = chunkStart + chunkSize;
+      if (chunkEnd > reader.length) {
+        throw FormatException(
+            'Chunk out of bounds: start=$chunkStart size=$chunkSize total=${reader.length}');
+      }
 
       switch (tag) {
-        case RES_XML_FIRST_CHUNK_TYPE:
+        case START_NAMESPACE_TAG:
+        case END_NAMESPACE_TAG:
         case RES_XML_RESOURCE_MAP_TYPE:
-          // Skip chunk
+          // Namespace/resource map are not emitted into plain XML.
           break;
         case START_ELEMENT_TAG:
           parseStartTag(result, reader, packedStrings, ident);
           ident++;
           break;
         case END_ELEMENT_TAG:
-          ident--;
+          ident = math.max(ident - 1, 0);
           parseEndTag(result, reader, packedStrings, ident);
           break;
         case CDATA_TAG:
           parseCDataTag(result, reader, packedStrings, ident);
           break;
         default:
-          print('Unknown Tag 0x${tag.toRadixString(16)}');
+          log.fine(
+              'BinaryXmlDecompressor: Unknown tag 0x${tag.toRadixString(16)}');
       }
 
-      if (tag == END_DOC_TAG) break;
+      // Always align to chunk boundary, even if parse consumed fewer bytes.
+      if (reader.position != chunkEnd) {
+        reader.position = chunkEnd;
+      }
     }
 
     return result.toString();
@@ -178,14 +195,14 @@ class BinaryXmlDecompressor {
       StringBuffer sb, ByteDataReader reader, List<String> strings, int ident) {
     int marker = reader.readInt32();
     if (marker != ATTRS_MARKER) {
-      print(
-          'Expecting ${ATTRS_MARKER.toRadixString(16)}, Found ${marker.toRadixString(16)}');
+      log.fine(
+          'BinaryXmlDecompressor: expecting ${ATTRS_MARKER.toRadixString(16)}, found ${marker.toRadixString(16)}');
     }
 
-    int numAttributes = reader.readInt32();
-
-    // Skipping 1 unknown integer (always 00000000)
-    reader.skipBytes(4);
+    // ResXMLTree_attrExt:
+    // uint16 attributeCount, uint16 idIndex, uint16 classIndex, uint16 styleIndex
+    int numAttributes = reader.readUint16();
+    reader.skipBytes(6);
 
     for (int i = 0; i < numAttributes; i++) {
       sb.write('\n');
@@ -195,9 +212,10 @@ class BinaryXmlDecompressor {
       int attributeNameIndex = reader.readInt32();
       int attributeValueIndex = reader.readInt32();
 
-      // Skipping 3 bytes, as there are 3 unknown bytes
-      reader.skipBytes(3);
-      int attrValueType = reader.readInt8();
+      // typedValue header: size(uint16), res0(uint8), dataType(uint8)
+      reader.readUint16(); // size, usually 8
+      reader.readUint8(); // res0
+      int attrValueType = reader.readUint8();
       int attributeResourceId = reader.readInt32();
 
       if (appendNamespaces && attributeNamespaceIndex >= 0) {
@@ -275,13 +293,19 @@ class BinaryXmlDecompressor {
     int numStyles = reader.readInt32();
     int flags = reader.readInt32();
     int stringStart = reader.readInt32();
-    int stylesStart = reader.readInt32();
+    reader.readInt32(); // stylesStart
 
     bool isUtf8Encoded = (flags & UTF8_FLAG) != 0;
-    int glyphSize = isUtf8Encoded ? 1 : 2;
 
-    return parseUsingByteBuffer(chunkSize, headerSize, numStrings, numStyles,
-        isUtf8Encoded, glyphSize, reader);
+    return parseUsingByteBuffer(
+      chunkSize,
+      headerSize,
+      numStrings,
+      numStyles,
+      isUtf8Encoded,
+      stringStart,
+      reader,
+    );
   }
 
   List<String> parseUsingByteBuffer(
@@ -290,7 +314,7 @@ class BinaryXmlDecompressor {
       int numStrings,
       int numStyles,
       bool isUtf8Encoded,
-      int glyphSize,
+      int stringStart,
       ByteDataReader reader) {
     int dataSize = chunkSize - headerSize;
     Uint8List buffer = Uint8List(dataSize);
@@ -304,27 +328,57 @@ class BinaryXmlDecompressor {
       offsets[i] = bdr.readInt32();
     }
 
+    // Skip style offsets table if present.
+    if (numStyles > 0) {
+      bdr.skipBytes(numStyles * 4);
+    }
+
+    final stringsStart = stringStart - headerSize;
+    if (stringsStart < 0 || stringsStart >= dataSize) {
+      throw FormatException(
+          'Invalid string pool start: stringStart=$stringStart headerSize=$headerSize dataSize=$dataSize');
+    }
+
     // Read the strings from each offset
-    int stringsStart = bdr.position;
     for (int i = 0; i < numStrings; i++) {
       bdr.position = stringsStart + offsets[i];
-      int len;
       if (isUtf8Encoded) {
-        len = bdr.readInt8() & 0xff;
-        bdr.skipBytes(1);
+        // UTF-8 strings encode utf16_length and utf8_length using variable
+        // length prefixes.
+        _readLength8(bdr); // utf16 length, not needed for decoding.
+        final utf8Len = _readLength8(bdr);
+        final bytes = bdr.readUint8List(utf8Len);
+        packedStrings[i] = utf8.decode(bytes, allowMalformed: true);
       } else {
-        len = bdr.readInt16() & 0xffff;
-      }
-      if (isUtf8Encoded) {
-        Uint8List bytes = bdr.getUint8List(stringsStart + offsets[i] + 2, len);
-        packedStrings[i] = utf8.decode(bytes);
-      } else {
-        Uint16List utf16CodeUnits =
-            bdr.getUint16List(stringsStart + offsets[i] + 2, len);
-        packedStrings[i] = String.fromCharCodes(utf16CodeUnits);
+        final utf16Len = _readLength16(bdr);
+        final bytes = bdr.readUint8List(utf16Len * 2);
+        final codeUnits = Uint16List.view(
+          bytes.buffer,
+          bytes.offsetInBytes,
+          utf16Len,
+        );
+        packedStrings[i] = String.fromCharCodes(codeUnits);
       }
     }
     return packedStrings;
+  }
+
+  int _readLength8(ByteDataReader reader) {
+    final first = reader.readUint8();
+    if ((first & 0x80) == 0) {
+      return first;
+    }
+    final second = reader.readUint8();
+    return ((first & 0x7f) << 8) | second;
+  }
+
+  int _readLength16(ByteDataReader reader) {
+    final first = reader.readUint16();
+    if ((first & 0x8000) == 0) {
+      return first;
+    }
+    final second = reader.readUint16();
+    return ((first & 0x7fff) << 16) | second;
   }
 
   static int getUnsignedShort(ByteData data, int position,

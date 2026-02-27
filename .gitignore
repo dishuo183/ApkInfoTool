@@ -51,3 +51,6 @@ lib/gen
 # Ignore generated dart files
 **/*.g.dart
 **/*.freezed.dart
+
+# OMC
+.omc

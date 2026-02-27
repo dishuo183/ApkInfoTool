@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui';
 
+import 'package:apk_info_tool/apkparser/adaptive_icon_renderer.dart';
 import 'package:apk_info_tool/config.dart';
 import 'package:apk_info_tool/gen/strings.g.dart';
 import 'package:apk_info_tool/utils/command_tools.dart';
@@ -44,7 +46,9 @@ final _kSplitDensityTokens = <String>{
 
 bool _looksLikeSplitAbi(String value) {
   if (_kSplitAbiTokens.contains(value)) return true;
-  return value.contains('v7a') || value.contains('v8a') || value.contains('x86');
+  return value.contains('v7a') ||
+      value.contains('v8a') ||
+      value.contains('x86');
 }
 
 bool _looksLikeSplitDensity(String value) {
@@ -576,6 +580,72 @@ class ApkInfo {
     return path.endsWith('.webp') || path.endsWith('.png');
   }
 
+  bool _isBitmapPath(String path) {
+    final lower = path.toLowerCase();
+    return lower.endsWith('.webp') ||
+        lower.endsWith('.png') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg');
+  }
+
+  bool _isXmlPath(String path) {
+    return path.toLowerCase().endsWith('.xml');
+  }
+
+  Future<Image?> _decodeImageData(Uint8List data) async {
+    try {
+      final codec = await instantiateImageCodec(data);
+      final frame = await codec.getNextFrame();
+      return frame.image;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  int _unknownPathScore(String candidate) {
+    final lower = candidate.toLowerCase();
+    var score = 0;
+    if (lower.contains('mipmap')) score += 300;
+    if (lower.contains('drawable')) score += 220;
+    if (lower.contains('launcher')) score += 180;
+    if (_isBitmapPath(lower)) score += 200;
+    if (_isXmlPath(lower)) score += 120;
+    if (lower.contains('-xxxhdpi')) score += 90;
+    if (lower.contains('-xxhdpi')) score += 80;
+    if (lower.contains('-xhdpi')) score += 70;
+    if (lower.contains('-hdpi')) score += 60;
+    if (lower.contains('-mdpi')) score += 50;
+    return score;
+  }
+
+  List<String> _findUnknownCandidatePaths(ZipHelper zip, String candidate) {
+    final raw = candidate.trim();
+    if (raw.isEmpty) return const [];
+    final normalized = raw.replaceAll('\\', '/');
+    final files = zip.listFiles();
+    final result = <String>{};
+    if (files.contains(normalized)) {
+      result.add(normalized);
+    }
+    if (normalized.startsWith('/')) {
+      final tmp = normalized.substring(1);
+      if (files.contains(tmp)) {
+        result.add(tmp);
+      }
+    }
+    final base = path.basename(normalized).toLowerCase();
+    for (final file in files) {
+      final fileLower = file.toLowerCase();
+      final fileBase = path.basename(fileLower);
+      if (fileBase == base || fileLower.endsWith('/$base')) {
+        result.add(file);
+      }
+    }
+    final sorted = result.toList();
+    sorted.sort((a, b) => _unknownPathScore(b).compareTo(_unknownPathScore(a)));
+    return sorted;
+  }
+
   /// 加载APK图标
   /// 返回图标的字节数据，如果加载失败返回null
   Future<Image?> loadIcon() async {
@@ -585,36 +655,137 @@ class ApkInfo {
       }
     }
 
+    final zip = ZipHelper();
     try {
-      final zip = ZipHelper();
       zip.open(apkPath);
+      AdaptiveIconRenderer? adaptiveIconRenderer;
+      final aaptPath = CommandTools.findAapt2Path();
 
       final candidates = <String>[];
       if (mainIconPath != null && mainIconPath!.isNotEmpty) {
         candidates.add(mainIconPath!);
       }
       candidates.addAll(_buildIconCandidates());
-      log.info('loadIcon: candidates=${candidates.join(", ")}');
+      final uniqueCandidates = <String>[];
+      final seenCandidates = <String>{};
+      for (final item in candidates) {
+        if (seenCandidates.add(item)) {
+          uniqueCandidates.add(item);
+        }
+      }
+      log.info('loadIcon: candidates=${uniqueCandidates.join(", ")}');
 
-      for (final iconPath in candidates) {
+      for (final iconPath in uniqueCandidates) {
         if (_isBitmapIcon(iconPath)) {
           final data = await zip.readFileContent(iconPath);
           if (data != null) {
-            final codec = await instantiateImageCodec(data);
-            final frame = await codec.getNextFrame();
-            log.info('loadIcon: 使用图标: $iconPath');
-            return frame.image;
+            final image = await _decodeImageData(data);
+            if (image != null) {
+              log.info('loadIcon: 使用图标: $iconPath');
+              return image;
+            }
           }
           log.info('loadIcon: 找不到图标文件: $iconPath');
         } else if (iconPath.endsWith('.xml')) {
-          log.info('loadIcon: 暂不支持XML格式的图标: $iconPath');
+          if (aaptPath == null || aaptPath.isEmpty) {
+            log.info('loadIcon: aapt2 未配置，无法解析 XML 图标: $iconPath');
+            continue;
+          }
+          adaptiveIconRenderer ??= AdaptiveIconRenderer(
+            apkPath: apkPath,
+            aaptPath: aaptPath,
+            zip: zip,
+          );
+          final image = await adaptiveIconRenderer.render(iconPath);
+          if (image != null) {
+            log.info('loadIcon: 使用 XML 图标: $iconPath');
+            return image;
+          }
+          log.info('loadIcon: XML 图标解析失败: $iconPath');
         } else {
+          if (aaptPath != null && aaptPath.isNotEmpty) {
+            adaptiveIconRenderer ??= AdaptiveIconRenderer(
+              apkPath: apkPath,
+              aaptPath: aaptPath,
+              zip: zip,
+            );
+            final rendered = await adaptiveIconRenderer.render(iconPath);
+            if (rendered != null) {
+              log.info('loadIcon: 使用资源引用图标: $iconPath');
+              return rendered;
+            }
+          }
+
+          final resolvedPaths = _findUnknownCandidatePaths(zip, iconPath);
+          for (final resolved in resolvedPaths) {
+            if (_isXmlPath(resolved)) {
+              if (aaptPath == null || aaptPath.isEmpty) continue;
+              adaptiveIconRenderer ??= AdaptiveIconRenderer(
+                apkPath: apkPath,
+                aaptPath: aaptPath,
+                zip: zip,
+              );
+              final rendered = await adaptiveIconRenderer.render(resolved);
+              if (rendered != null) {
+                log.info('loadIcon: 使用反查XML图标: $resolved (from: $iconPath)');
+                return rendered;
+              }
+              continue;
+            }
+
+            final data = await zip.readFileContent(resolved);
+            if (data == null || data.isEmpty) continue;
+            final image = await _decodeImageData(data);
+            if (image != null) {
+              log.info('loadIcon: 使用反查位图图标: $resolved (from: $iconPath)');
+              return image;
+            }
+          }
           log.info('loadIcon: 不支持的图标格式: $iconPath');
         }
       }
+
+      // 兜底：从 APK 中启发式扫描可能的启动图标资源
+      final fallbackCandidates = zip
+          .listFiles()
+          .where((e) {
+            final lower = e.toLowerCase();
+            return lower.contains('mipmap') ||
+                (lower.contains('drawable') && lower.contains('launcher'));
+          })
+          .toSet()
+          .toList()
+        ..sort((a, b) => _unknownPathScore(b).compareTo(_unknownPathScore(a)));
+
+      for (final candidate in fallbackCandidates) {
+        if (_isXmlPath(candidate)) {
+          if (aaptPath == null || aaptPath.isEmpty) continue;
+          adaptiveIconRenderer ??= AdaptiveIconRenderer(
+            apkPath: apkPath,
+            aaptPath: aaptPath,
+            zip: zip,
+          );
+          final rendered = await adaptiveIconRenderer.render(candidate);
+          if (rendered != null) {
+            log.info('loadIcon: 使用兜底XML图标: $candidate');
+            return rendered;
+          }
+          continue;
+        }
+        final data = await zip.readFileContent(candidate);
+        if (data == null || data.isEmpty) continue;
+        final image = await _decodeImageData(data);
+        if (image != null) {
+          log.info('loadIcon: 使用兜底位图图标: $candidate');
+          return image;
+        }
+      }
+
       log.info('loadIcon: 未找到可用图标');
     } catch (e) {
       log.warning('loadIcon: 加载图标失败: $e');
+    } finally {
+      zip.close();
     }
     return null;
   }
