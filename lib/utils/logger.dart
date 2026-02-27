@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:io';
 
@@ -18,6 +19,7 @@ class LoggerInit {
 
   File? _logFile;
   IOSink? _logSink;
+  StreamSubscription<LogRecord>? _logSubscription;
 
   /// 日志文件最大大小: 2MB
   static const int _maxLogFileSize = 2 * 1024 * 1024;
@@ -34,7 +36,7 @@ class LoggerInit {
 
   static initLogger() async {
     Logger.root.level = Level.INFO;
-    Logger.root.onRecord.listen((record) {
+    instance._logSubscription = Logger.root.onRecord.listen((record) {
       if (!kReleaseMode) {
         developer.log(
             '${record.level.name}: ${_formatTime(record.time)}: ${record.message}');
@@ -96,6 +98,8 @@ class LoggerInit {
   String? get logFilePath => _logFile?.path;
 
   Future<void> dispose() async {
+    await _logSubscription?.cancel();
+    _logSubscription = null;
     await _logSink?.flush();
     await _logSink?.close();
     _logSink = null;

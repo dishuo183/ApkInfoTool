@@ -145,6 +145,10 @@ class XapkInstaller {
     final process = await Process.start(executable, args);
     _currentProcess = process;
 
+    // 消耗 stdout/stderr 防止管道缓冲区满导致进程死锁
+    process.stdout.drain<void>();
+    process.stderr.drain<void>();
+
     final exitCode = await process.exitCode;
     _currentProcess = null;
 

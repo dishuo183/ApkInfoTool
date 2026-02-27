@@ -320,9 +320,10 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
   @override
   Widget build(BuildContext context) {
     // 在当前页/文件/APK信息变化时需要更新Actions, 因为Actions的变化会修改按钮的使能状态
-    ref.listen(currentPageProvider, (_, __) => updateActions());
-    ref.listen(currentFileStateProvider, (_, __) => updateActions());
-    ref.listen(currentApkInfoProvider, (_, __) => updateActions());
+    // 使用微任务合并连续变化，避免同一帧内多次重建 actions
+    ref.listen(currentPageProvider, (_, __) => _scheduleUpdateActions());
+    ref.listen(currentFileStateProvider, (_, __) => _scheduleUpdateActions());
+    ref.listen(currentApkInfoProvider, (_, __) => _scheduleUpdateActions());
     final apkInfo = ref.watch(currentApkInfoProvider);
     final fileState = ref.watch(currentFileStateProvider);
     final isParsing = ref.watch(isParsingProvider);
@@ -360,13 +361,9 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Expanded(
-                  child: SingleChildScrollView(
-                    child: Padding(
-                      // 指定上下左右的内边距为 10 像素
-                      padding: const EdgeInsets.only(left: 10, right: 10),
-                      child: ListView(
-                        shrinkWrap: true,
-                        children: [
+                  child: ListView(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    children: [
                           Card(
                               child: TitleValueLayout(
                                   title: t.file_info.file,
@@ -518,9 +515,7 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
                               maxLines: textMaxLines,
                               selectable: true,
                             )),
-                        ],
-                      ),
-                    ),
+                    ],
                   ),
                 ),
               ],
@@ -561,8 +556,8 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
   PopupMenuButton<String> _buildMoreMenuButton(BuildContext context) {
     final apkInfo = ref.watch(currentApkInfoProvider);
     final state = ref.watch(currentFileStateProvider);
-    log.info(
-        "_buildMoreMenuButton: state.filePath=${state.filePath}, apkInfo=$apkInfo");
+    log.fine(
+        "_buildMoreMenuButton: state.filePath=${state.filePath}");
     return PopupMenuButton<String>(
       icon: const Icon(Icons.more_horiz),
       tooltip: t.home.more_actions,
@@ -684,6 +679,17 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
         ],
       ),
     );
+  }
+
+  bool _updateActionsPending = false;
+
+  void _scheduleUpdateActions() {
+    if (_updateActionsPending) return;
+    _updateActionsPending = true;
+    Future.microtask(() {
+      _updateActionsPending = false;
+      if (mounted) updateActions();
+    });
   }
 
   void updateActions() {
