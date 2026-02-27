@@ -8,13 +8,13 @@
 
 - 查看 APK/XAPK/APKM/APKS 基本信息（包名、版本、SDK、权限等）
 - XAPK/APKM/APKS 分包信息展示（Split APK 列表、OBB 列表）
-- 图标显示（PNG/WebP，XAPK/APKM/APKS 支持 icon.png 或 manifest 指定路径）
+- 图标显示（PNG/WebP/XML 自适应图标，XAPK/APKM/APKS 支持 icon.png 或 manifest 指定路径）
 - 文件重命名（APK/XAPK/APKM/APKS）
 - 通过 ADB 安装（支持 split APK 与 OBB 推送）
 
 ## 已知问题
 - 某些 APK/XAPK/APKM/APKS 解析速度慢：使用 aapt2 解析 base.apk，速度依赖于 aapt2 的性能表现。
-- 某些 APK 不显示图标：目前仅支持 png 和 webp 格式的图标，xml 格式的图标目前不支持显示。
+- 某些 APK 图标显示不完全一致：已支持 PNG、WebP 及 XML 自适应图标的解析与渲染，但对于特殊或复杂的自适应图标，显示效果可能与实际设备上有所差异。
 - macOS 因沙箱原因，有以下问题
   - 重命名功能无法工作
   - 无法指定外部的 adb 和 aapt2，只能使用内置的
