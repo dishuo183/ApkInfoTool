@@ -1229,8 +1229,8 @@ class AdaptiveIconRenderer {
     for (final e in emptyEntryRawLines.entries) {
       final entry = byId[e.key];
       if (entry != null) {
-        _debug(
-            'emptyResourceEntry: ${entry.id} ${entry.name} rawLines=${e.value.length} content=${e.value.take(5).map((l) => l.trim()).join(" | ")}');
+        log.finer(
+            'AdaptiveIconRenderer: emptyResourceEntry: ${entry.id} ${entry.name} rawLines=${e.value.length} content=${e.value.take(5).map((l) => l.trim()).join(" | ")}');
       }
     }
 

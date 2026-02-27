@@ -136,7 +136,7 @@ Future<ApkInfo?> getApkInfo(String apk) async {
   // 检查是否为XAPK/APKM/APKS格式
   if (_isArchiveApk(apk)) {
     final extension = path.extension(apk).toLowerCase();
-    log.info("getApkInfo: parsing XAPK/APKM/APKS file");
+    log.fine("getApkInfo: parsing XAPK/APKM/APKS file");
     apkInfo.isXapk = true;
     apkInfo.archiveType = _archiveTypeFromExtension(extension);
 
@@ -182,7 +182,7 @@ Future<ApkInfo?> getApkInfo(String apk) async {
                 apkInfo.apkPath = originalPath;
               }
             } catch (e) {
-              log.info("getApkInfo: base APK parse failed: $e");
+              log.warning("getApkInfo: base APK parse failed: $e");
             }
           }
         }
@@ -248,7 +248,7 @@ Future<ApkInfo?> getApkInfo(String apk) async {
         apkInfo.label == null &&
         apkInfo.archiveApks.isEmpty &&
         manifest == null) {
-      log.info("getApkInfo: failed to parse XAPK/APKM/APKS");
+      log.warning("getApkInfo: failed to parse XAPK/APKM/APKS");
       return null;
     }
 
@@ -294,7 +294,7 @@ Future<ApkInfo?> getApkInfo(String apk) async {
           final signInfo = await getSignatureInfo(apk);
           apkInfo.signatureInfo = signInfo;
         } catch (e) {
-          log.info("getApkInfo: 获取签名信息失败: $e");
+          log.warning("getApkInfo: 获取签名信息失败: $e");
           apkInfo.signatureInfo = "获取签名信息失败: $e";
         }
       }
@@ -302,7 +302,7 @@ Future<ApkInfo?> getApkInfo(String apk) async {
       return apkInfo;
     }
   } catch (e) {
-    log.info("getApkInfo: error=$e");
+    log.warning("getApkInfo: error=$e");
   }
 
   return null;
@@ -701,7 +701,7 @@ class ApkInfo {
           }
         }
       }
-      log.info('loadIcon: candidates=${prioritizedCandidates.join(", ")}');
+      log.fine('loadIcon: candidates=${prioritizedCandidates.join(", ")}');
 
       for (final iconPath in prioritizedCandidates) {
         if (_isBitmapIcon(iconPath)) {
@@ -709,14 +709,14 @@ class ApkInfo {
           if (data != null) {
             final image = await _decodeImageData(data);
             if (image != null) {
-              log.info('loadIcon: 使用图标: $iconPath');
+              log.fine('loadIcon: 使用图标: $iconPath');
               return image;
             }
           }
-          log.info('loadIcon: 找不到图标文件: $iconPath');
+          log.fine('loadIcon: 找不到图标文件: $iconPath');
         } else if (iconPath.endsWith('.xml')) {
           if (aaptPath == null || aaptPath.isEmpty) {
-            log.info('loadIcon: aapt2 未配置，无法解析 XML 图标: $iconPath');
+            log.fine('loadIcon: aapt2 未配置，无法解析 XML 图标: $iconPath');
             continue;
           }
           adaptiveIconRenderer ??= AdaptiveIconRenderer(
@@ -726,10 +726,10 @@ class ApkInfo {
           );
           final image = await adaptiveIconRenderer.render(iconPath);
           if (image != null) {
-            log.info('loadIcon: 使用 XML 图标: $iconPath');
+            log.fine('loadIcon: 使用 XML 图标: $iconPath');
             return image;
           }
-          log.info('loadIcon: XML 图标解析失败: $iconPath');
+          log.fine('loadIcon: XML 图标解析失败: $iconPath');
         } else {
           if (aaptPath != null && aaptPath.isNotEmpty) {
             adaptiveIconRenderer ??= AdaptiveIconRenderer(
@@ -739,7 +739,7 @@ class ApkInfo {
             );
             final rendered = await adaptiveIconRenderer.render(iconPath);
             if (rendered != null) {
-              log.info('loadIcon: 使用资源引用图标: $iconPath');
+              log.fine('loadIcon: 使用资源引用图标: $iconPath');
               return rendered;
             }
           }
@@ -755,7 +755,7 @@ class ApkInfo {
               );
               final rendered = await adaptiveIconRenderer.render(resolved);
               if (rendered != null) {
-                log.info('loadIcon: 使用反查XML图标: $resolved (from: $iconPath)');
+                log.fine('loadIcon: 使用反查XML图标: $resolved (from: $iconPath)');
                 return rendered;
               }
               continue;
@@ -765,11 +765,11 @@ class ApkInfo {
             if (data == null || data.isEmpty) continue;
             final image = await _decodeImageData(data);
             if (image != null) {
-              log.info('loadIcon: 使用反查位图图标: $resolved (from: $iconPath)');
+              log.fine('loadIcon: 使用反查位图图标: $resolved (from: $iconPath)');
               return image;
             }
           }
-          log.info('loadIcon: 不支持的图标格式: $iconPath');
+          log.fine('loadIcon: 不支持的图标格式: $iconPath');
         }
       }
 
@@ -794,7 +794,7 @@ class ApkInfo {
           );
           final rendered = await adaptiveIconRenderer.render(candidate);
           if (rendered != null) {
-            log.info('loadIcon: 使用兜底XML图标: $candidate');
+            log.fine('loadIcon: 使用兜底XML图标: $candidate');
             return rendered;
           }
           continue;
@@ -803,12 +803,12 @@ class ApkInfo {
         if (data == null || data.isEmpty) continue;
         final image = await _decodeImageData(data);
         if (image != null) {
-          log.info('loadIcon: 使用兜底位图图标: $candidate');
+          log.fine('loadIcon: 使用兜底位图图标: $candidate');
           return image;
         }
       }
 
-      log.info('loadIcon: 未找到可用图标');
+      log.fine('loadIcon: 未找到可用图标');
     } catch (e) {
       log.warning('loadIcon: 加载图标失败: $e');
     } finally {
