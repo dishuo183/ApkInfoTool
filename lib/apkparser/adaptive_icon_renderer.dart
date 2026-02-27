@@ -114,6 +114,38 @@ class AdaptiveIconRenderer {
     }
   }
 
+  Future<List<String>> findBitmapAlternativesForPath(String filePath) async {
+    final normalized = _normalizeZipPath(filePath);
+    if (normalized.isEmpty) return const [];
+    final table = await _loadResourceTable();
+    if (table == null) return const [];
+
+    final lower = normalized.toLowerCase();
+    final result = <String>{};
+    final matchedEntryNames = <String>{};
+    for (final entry in table.byId.values) {
+      final hasTarget = entry.filePaths.any(
+        (p) => _normalizeZipPath(p).toLowerCase() == lower,
+      );
+      if (!hasTarget) continue;
+      matchedEntryNames.add(entry.name);
+      for (final file in entry.filePaths) {
+        final candidate = _normalizeZipPath(file);
+        if (_isBitmapPath(candidate)) {
+          result.add(candidate);
+        }
+      }
+    }
+
+    final sorted = result.toList()
+      ..sort((a, b) => _fileScore(b).compareTo(_fileScore(a)));
+    if (sorted.isNotEmpty) {
+      _debug(
+          'findBitmapAlternativesForPath: $normalized -> ${sorted.join(", ")} entries=${matchedEntryNames.join("|")}');
+    }
+    return sorted;
+  }
+
   Future<void> _renderDrawable(
     Canvas canvas,
     Rect rect,

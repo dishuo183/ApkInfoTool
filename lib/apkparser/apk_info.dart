@@ -673,9 +673,34 @@ class ApkInfo {
           uniqueCandidates.add(item);
         }
       }
-      log.info('loadIcon: candidates=${uniqueCandidates.join(", ")}');
-
+      final prioritizedCandidates = <String>[];
+      final prioritizedSeen = <String>{};
       for (final iconPath in uniqueCandidates) {
+        if (_isXmlPath(iconPath) && aaptPath != null && aaptPath.isNotEmpty) {
+          adaptiveIconRenderer ??= AdaptiveIconRenderer(
+            apkPath: apkPath,
+            aaptPath: aaptPath,
+            zip: zip,
+          );
+          final resourceLinkedBitmaps = await adaptiveIconRenderer
+              .findBitmapAlternativesForPath(iconPath);
+          if (resourceLinkedBitmaps.isNotEmpty) {
+            log.fine(
+                'loadIcon: XML 资源同条目位图候选($iconPath) => ${resourceLinkedBitmaps.join(", ")}');
+          }
+          for (final bitmap in resourceLinkedBitmaps) {
+            if (prioritizedSeen.add(bitmap)) {
+              prioritizedCandidates.add(bitmap);
+            }
+          }
+        }
+        if (prioritizedSeen.add(iconPath)) {
+          prioritizedCandidates.add(iconPath);
+        }
+      }
+      log.info('loadIcon: candidates=${prioritizedCandidates.join(", ")}');
+
+      for (final iconPath in prioritizedCandidates) {
         if (_isBitmapIcon(iconPath)) {
           final data = await zip.readFileContent(iconPath);
           if (data != null) {
