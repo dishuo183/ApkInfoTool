@@ -66,6 +66,7 @@ class ZipHelper {
   }
 
   void close() {
+    _archive?.clearSync();
     _archive = null;
     _filePath = null;
   }

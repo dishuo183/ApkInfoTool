@@ -159,6 +159,13 @@ Future<ApkInfo?> getApkInfo(String apk) async {
       apkInfo.archiveApks = zip.listFiles(extension: '.apk');
       apkInfo.obbFiles = zip.listFiles(extension: '.obb');
 
+      // 优先加载打包文件自带的图标（xapk/apkm 自身携带的 icon）
+      final xapkIcon = await loadXapkIcon(apk,
+          iconPath: manifest?.icon, sharedZip: zip);
+      if (xapkIcon != null) {
+        apkInfo.mainIconImage = xapkIcon;
+      }
+
       final baseEntry = _findBaseApkEntry(apkInfo.archiveApks);
       if (baseEntry != null) {
         tempDir = await Directory.systemTemp.createTemp('apk_info_base');
@@ -185,9 +192,12 @@ Future<ApkInfo?> getApkInfo(String apk) async {
               final originalPath = apkInfo.apkPath;
               apkInfo.apkPath = baseApkPath;
               parseApkInfoFromOutput(result.stdout.toString(), apkInfo);
-              final iconImage = await apkInfo.loadIcon();
-              if (iconImage != null) {
-                apkInfo.mainIconImage ??= iconImage;
+              // 仅在打包文件不包含图标时，才从 base APK 加载图标
+              if (apkInfo.mainIconImage == null) {
+                final iconImage = await apkInfo.loadIcon();
+                if (iconImage != null) {
+                  apkInfo.mainIconImage = iconImage;
+                }
               }
               apkInfo.apkPath = originalPath;
             }
@@ -230,17 +240,6 @@ Future<ApkInfo?> getApkInfo(String apk) async {
         }
         if (manifest.totalSize != null && manifest.totalSize! > 0) {
           apkInfo.totalSize = manifest.totalSize;
-        }
-        // 使用共享的 zip 实例加载图标（不再重新打开文件）
-        final iconImage = await loadXapkIcon(apk,
-            iconPath: manifest.icon, sharedZip: zip);
-        if (iconImage != null && apkInfo.mainIconImage == null) {
-          apkInfo.mainIconImage = iconImage;
-        }
-      } else {
-        final iconImage = await loadXapkIcon(apk, sharedZip: zip);
-        if (iconImage != null && apkInfo.mainIconImage == null) {
-          apkInfo.mainIconImage = iconImage;
         }
       }
     } finally {
