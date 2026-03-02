@@ -9,6 +9,7 @@
 - 查看 APK/XAPK/APKM/APKS 基本信息（包名、版本、SDK、权限等）
 - XAPK/APKM/APKS 分包信息展示（Split APK 列表、OBB 列表）
 - 图标显示（PNG/WebP/XML 自适应图标，支持渐变填充等复杂矢量图标）
+- 图标切换与导出（多候选图标切换，支持导出为 PNG/SVG/原始文件）
 - 图标显示大小可配置（2行/3行）
 - 签名信息查看、文件哈希计算（MD5/SHA1）
 - 文件重命名（APK/XAPK/APKM/APKS）

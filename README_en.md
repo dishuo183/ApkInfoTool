@@ -9,6 +9,7 @@ A simple tool for viewing APK/XAPK/APKM/APKS file information and installation.
 - View APK/XAPK/APKM/APKS basic information (package, version, SDK, permissions, etc.)
 - Show XAPK/APKM/APKS split details (split APK list, OBB list)
 - Icon preview (PNG/WebP/XML adaptive icons, including gradient-filled vector icons)
+- Icon switching & export (switch between multiple icon candidates, export as PNG/SVG/original file)
 - Configurable icon display size (2 or 3 rows)
 - Signature info viewer and file hash calculation (MD5/SHA1)
 - File renaming (APK/XAPK/APKM/APKS)
