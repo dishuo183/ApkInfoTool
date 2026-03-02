@@ -72,6 +72,7 @@ class Config {
   static final themeColor = ConfigItem("theme_color", Colors.blue.value);
   static final titleWidth = ConfigItem("title_width", 100.0);
   static final language = ConfigItem("language", kLanguageAuto);
+  static final iconRowSpan = ConfigItem("icon_row_span", 2);
 
   static final List<ConfigItem> _globalItems = [
     aapt2Path,
@@ -87,7 +88,8 @@ class Config {
     maxLines,
     themeColor,
     titleWidth,
-    language
+    language,
+    iconRowSpan
   ];
 
   static Future<void> init() async {

@@ -126,6 +126,8 @@ class AdaptiveIconRenderer {
         _kCanvasSize.toDouble(),
         _kCanvasSize.toDouble(),
       );
+      // 绘制白色底色：避免透明背景在深色主题下显示为黑色
+      canvas.drawRect(rect, Paint()..color = const Color(0xFFFFFFFF));
       await _renderDrawable(canvas, rect, normalized, 0);
       if (!_didDraw) {
         _debug('render end: no drawing happened');
@@ -314,6 +316,12 @@ class AdaptiveIconRenderer {
 
     canvas.save();
     canvas.clipPath(_defaultAdaptiveMask(rect));
+
+    // 绘制白色底色作为安全兜底：所有规范的自适应图标背景层都应不透明，
+    // 但如果背景颜色资源解析失败（如混淆 APK 的颜色引用），
+    // 避免出现透明/黑色背景。正常的背景层会覆盖此底色。
+    canvas.drawRect(rect, Paint()..color = const Color(0xFFFFFFFF));
+
     final scaleTarget = foreground ?? monochrome;
     final foregroundScale =
         await _resolveAdaptiveForegroundScale(scaleTarget, depth + 1);
@@ -1560,7 +1568,9 @@ class AdaptiveIconRenderer {
     if (signed == null) return null;
 
     var color = signed & 0xffffffff;
-    if ((color & 0xff000000) == 0 && color <= 0x00ffffff) {
+    // 仅在非零 RGB 且 alpha 为 0 时补充 alpha（如 0x00FF00 → 0xFF00FF00）。
+    // 值为 0x00000000 时保持透明，不添加 alpha。
+    if ((color & 0xff000000) == 0 && color > 0 && color <= 0x00ffffff) {
       color |= 0xff000000;
     }
     return Color.fromARGB(

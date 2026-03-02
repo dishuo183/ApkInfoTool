@@ -76,7 +76,8 @@
     "title_width_preview": "Preview",
     "reset": "Reset",
     "language": "Language",
-    "language_auto": "Auto (System)"
+    "language_auto": "Auto (System)",
+    "icon_row_span": "Icon Row Span"
   },
   "parse": {
     "signature_verify_failed": "Signature verification failed",

@@ -43,6 +43,12 @@ class BinaryXmlDecompressor {
   static const int RES_TYPE_INT_HEX = 0x11;
   static const int RES_TYPE_INT_BOOLEAN = 0x12;
 
+  // Color Types
+  static const int RES_TYPE_INT_COLOR_ARGB8 = 0x1c;
+  static const int RES_TYPE_INT_COLOR_RGB8 = 0x1d;
+  static const int RES_TYPE_INT_COLOR_ARGB4 = 0x1e;
+  static const int RES_TYPE_INT_COLOR_RGB4 = 0x1f;
+
   // Complex Types
   static const int COMPLEX_UNIT_SHIFT = 0;
   static const int COMPLEX_UNIT_MASK = 0xf;
@@ -267,14 +273,28 @@ class BinaryXmlDecompressor {
           attributeValue = attributeResourceId.toString();
           break;
         case RES_TYPE_INT_HEX:
-          attributeValue = '0x${attributeResourceId.toRadixString(16)}';
+          attributeValue =
+              '0x${(attributeResourceId & 0xffffffff).toRadixString(16)}';
           break;
         case RES_TYPE_INT_BOOLEAN:
           attributeValue =
               (attributeResourceId == RES_VALUE_TRUE) ? 'true' : 'false';
           break;
+        case RES_TYPE_INT_COLOR_ARGB8:
+        case RES_TYPE_INT_COLOR_ARGB4:
+          // ARGB: output all 4 channels as-is with # prefix
+          attributeValue =
+              '#${(attributeResourceId & 0xffffffff).toRadixString(16).padLeft(8, '0')}';
+          break;
+        case RES_TYPE_INT_COLOR_RGB8:
+        case RES_TYPE_INT_COLOR_RGB4:
+          // RGB: alpha is implicitly 0xFF
+          attributeValue =
+              '#ff${(attributeResourceId & 0x00ffffff).toRadixString(16).padLeft(6, '0')}';
+          break;
         default:
-          attributeValue = '0x${attributeResourceId.toRadixString(16)}';
+          attributeValue =
+              '0x${(attributeResourceId & 0xffffffff).toRadixString(16)}';
       }
 
       sb.write('$attributeName="$attributeValue"');

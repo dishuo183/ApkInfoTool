@@ -333,6 +333,8 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
         .watch(settingStateProvider.select((value) => value.enableHash));
     final textMaxLines =
         ref.watch(uiConfigStateProvider.select((value) => value.textMaxLines));
+    final iconRowSpan =
+        ref.watch(uiConfigStateProvider.select((value) => value.iconRowSpan));
 
     return Stack(
       children: [
@@ -390,45 +392,73 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
                             end: _buildCopyButton(apkInfo?.packageName,
                                 apkInfo?.packageName != null),
                           )),
-                          Row(children: [
-                            Expanded(
-                                child: Column(
-                              children: [
-                                Card(
-                                    child: TitleValueLayout(
-                                  title: t.apk_info.version_code,
-                                  value: "${apkInfo?.versionCode ?? ""}",
-                                )),
-                                Card(
-                                    child: TitleValueLayout(
-                                  title: t.apk_info.version_name,
-                                  value: apkInfo?.versionName ?? "",
-                                )),
-                                if (apkInfo?.isXapk ?? false)
+                          Row(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.center,
+                            children: [
+                              Expanded(
+                                  child: Column(
+                                children: [
                                   Card(
                                       child: TitleValueLayout(
-                                    title: t.apk_info.archive_type,
-                                    value: apkInfo?.archiveType ?? "",
+                                    title: t.apk_info.version_code,
+                                    value:
+                                        "${apkInfo?.versionCode ?? ""}",
                                   )),
-                              ],
-                            )),
-                            Card(
-                                child: Container(
-                              margin: const EdgeInsets.all(4),
-                              width: 72,
-                              height: 72,
-                              child: RawImage(
-                                image: apkInfo?.mainIconImage,
-                                fit: BoxFit.contain,
-                              ),
-                            )),
-                          ]),
-                          Card(
-                            child: TitleValueLayout(
-                              title: t.apk_info.min_sdk,
-                              value: getSdkVersionText(apkInfo?.sdkVersion),
-                            ),
+                                  Card(
+                                      child: TitleValueLayout(
+                                    title: t.apk_info.version_name,
+                                    value: apkInfo?.versionName ?? "",
+                                  )),
+                                  if (iconRowSpan >= 3)
+                                    Card(
+                                      child: TitleValueLayout(
+                                        title: t.apk_info.min_sdk,
+                                        value: getSdkVersionText(
+                                            apkInfo?.sdkVersion),
+                                      ),
+                                    ),
+                                  if (apkInfo?.isXapk ?? false)
+                                    Card(
+                                        child: TitleValueLayout(
+                                      title: t.apk_info.archive_type,
+                                      value:
+                                          apkInfo?.archiveType ?? "",
+                                    )),
+                                ],
+                              )),
+                              () {
+                                final iconSize =
+                                    iconRowSpan * 44.0;
+                                final radius = iconSize * 0.22;
+                                return SizedBox(
+                                  width: iconSize,
+                                  height: iconSize,
+                                  child: Card(
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius:
+                                          BorderRadius.circular(
+                                              radius),
+                                    ),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: RawImage(
+                                      image:
+                                          apkInfo?.mainIconImage,
+                                      fit: BoxFit.contain,
+                                    ),
+                                  ),
+                                );
+                              }(),
+                            ],
                           ),
+                          if (iconRowSpan < 3)
+                            Card(
+                              child: TitleValueLayout(
+                                title: t.apk_info.min_sdk,
+                                value: getSdkVersionText(
+                                    apkInfo?.sdkVersion),
+                              ),
+                            ),
                           Card(
                               child: TitleValueLayout(
                             title: t.apk_info.target_sdk,
