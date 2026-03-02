@@ -119,6 +119,18 @@
     "signature_info": "署名情報",
     "text_info": "テキスト情報"
   },
+  "icon": {
+    "switch_icon": "アイコン切替",
+    "export_as_png": "PNGとして書き出す",
+    "export_as_svg": "SVGとして書き出す",
+    "export_original": "元ファイルを書き出す",
+    "export_icon": "アイコンを書き出す",
+    "export_success": "アイコンの書き出しに成功しました",
+    "export_failed": "書き出し失敗: {error}",
+    "bitmap_label": "{format} ({dpi})",
+    "vector_label": "XMLベクター ({dpi})",
+    "loading": "読み込み中..."
+  },
   "rename": {
     "rename_file": "ファイル名を変更",
     "app_name_only": "アプリ名のみ",

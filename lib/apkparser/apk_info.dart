@@ -9,9 +9,109 @@ import 'package:apk_info_tool/config.dart';
 import 'package:apk_info_tool/gen/strings.g.dart';
 import 'package:apk_info_tool/utils/command_tools.dart';
 import 'package:apk_info_tool/utils/logger.dart';
+import 'package:apk_info_tool/utils/vector_to_svg.dart';
 import 'package:apk_info_tool/utils/zip_helper.dart';
 import 'package:path/path.dart' as path;
 import 'xapk_info.dart';
+
+enum IconCandidateType { bitmap, xmlVector }
+
+class IconCandidate {
+  final String path;
+  final IconCandidateType type;
+  final String? dpiLabel;
+  final int? dpiValue;
+
+  Image? renderedImage;
+  Uint8List? rawBytes;
+
+  IconCandidate({
+    required this.path,
+    required this.type,
+    this.dpiLabel,
+    this.dpiValue,
+  });
+
+  /// 从路径推断类型和 DPI，可选传入已知 DPI 值
+  factory IconCandidate.fromPath(String entryPath, {int? knownDpi}) {
+    final lower = entryPath.toLowerCase();
+    final type = (lower.endsWith('.xml'))
+        ? IconCandidateType.xmlVector
+        : IconCandidateType.bitmap;
+
+    String? dpiLabel;
+    int? dpiValue;
+
+    // 从路径目录名中提取 DPI（如 mipmap-xxxhdpi-v4/）
+    final dpiMatch = RegExp(r'[/-](nodpi|anydpi(?:-v\d+)?|[a-z]*dpi)(?:[/-])').firstMatch(lower);
+    if (dpiMatch != null) {
+      dpiLabel = dpiMatch.group(1);
+      dpiValue = _dpiLabelToValue(dpiLabel);
+    }
+
+    // 如果路径中没找到 DPI，使用已知的 DPI 值
+    if (dpiLabel == null && knownDpi != null) {
+      dpiValue = knownDpi;
+      dpiLabel = _dpiValueToLabel(knownDpi);
+    }
+
+    return IconCandidate(
+      path: entryPath,
+      type: type,
+      dpiLabel: dpiLabel,
+      dpiValue: dpiValue,
+    );
+  }
+
+  /// 显示标签，包含文件名以便区分
+  String get displayLabel {
+    final fileName = path.split('/').last;
+    final baseName = fileName.contains('.')
+        ? fileName.substring(0, fileName.lastIndexOf('.'))
+        : fileName;
+    final dpiText = dpiLabel ?? '?';
+    if (type == IconCandidateType.xmlVector) {
+      return 'XML $baseName ($dpiText)';
+    }
+    final ext = fileName.contains('.')
+        ? fileName.substring(fileName.lastIndexOf('.') + 1).toUpperCase()
+        : '?';
+    return '$ext $baseName ($dpiText)';
+  }
+
+  void dispose() {
+    renderedImage?.dispose();
+    renderedImage = null;
+  }
+
+  static int? _dpiLabelToValue(String? label) {
+    if (label == null) return null;
+    return switch (label) {
+      'ldpi' => 120,
+      'mdpi' => 160,
+      'hdpi' => 240,
+      'xhdpi' => 320,
+      'xxhdpi' => 480,
+      'xxxhdpi' => 640,
+      'tvdpi' => 213,
+      _ => null,
+    };
+  }
+
+  static String? _dpiValueToLabel(int? value) {
+    if (value == null) return null;
+    return switch (value) {
+      120 => 'ldpi',
+      160 => 'mdpi',
+      240 => 'hdpi',
+      320 => 'xhdpi',
+      480 => 'xxhdpi',
+      640 => 'xxxhdpi',
+      213 => 'tvdpi',
+      _ => '${value}dpi',
+    };
+  }
+}
 
 bool _isArchiveApk(String apkPath) {
   final extension = path.extension(apkPath).toLowerCase();
@@ -389,6 +489,7 @@ class ApkInfo {
   String? label;
   String? mainIconPath; // 主图标路径
   Image? mainIconImage;
+  List<IconCandidate> iconCandidates = [];
   Map<String, String> labels = {};
   List<String> usesPermissions = [];
   Map<String, String> icons = {};
@@ -578,8 +679,8 @@ class ApkInfo {
     }
   }
 
-  // 从 application-icon-* 中按密度从大到小排列
-  List<String> _buildIconCandidates() {
+  // 从 application-icon-* 中按密度从大到小排列，返回 (dpi, path) 对
+  List<MapEntry<int, String>> _buildIconCandidatesWithDpi() {
     final entries = <MapEntry<int, String>>[];
     icons.forEach((key, value) {
       final tmp = int.tryParse(key);
@@ -590,7 +691,7 @@ class ApkInfo {
     });
 
     entries.sort((a, b) => b.key.compareTo(a.key));
-    return entries.map((e) => e.value).toList();
+    return entries;
   }
 
   bool _isBitmapIcon(String path) {
@@ -664,13 +765,12 @@ class ApkInfo {
     return sorted;
   }
 
-  /// 加载APK图标
-  /// 返回图标的字节数据，如果加载失败返回null
-  Future<Image?> loadIcon() async {
+  /// 收集所有图标候选路径，构建 iconCandidates 列表（不渲染）
+  Future<void> collectIconCandidates() async {
+    iconCandidates.clear();
+
     if (mainIconPath == null || mainIconPath!.isEmpty) {
-      if (icons.isEmpty) {
-        return null;
-      }
+      if (icons.isEmpty) return;
     }
 
     final zip = ZipHelper();
@@ -680,11 +780,18 @@ class ApkInfo {
       final aaptPath = CommandTools.findAapt2Path();
       final allFiles = zip.listFiles();
 
+      // 构建 path -> knownDpi 的映射
+      final dpiMap = <String, int>{};
+      final candidatesWithDpi = _buildIconCandidatesWithDpi();
+      for (final entry in candidatesWithDpi) {
+        dpiMap[entry.value] = entry.key;
+      }
+
       final candidates = <String>[];
       if (mainIconPath != null && mainIconPath!.isNotEmpty) {
         candidates.add(mainIconPath!);
       }
-      candidates.addAll(_buildIconCandidates());
+      candidates.addAll(candidatesWithDpi.map((e) => e.value));
       final uniqueCandidates = <String>[];
       final seenCandidates = <String>{};
       for (final item in candidates) {
@@ -692,7 +799,8 @@ class ApkInfo {
           uniqueCandidates.add(item);
         }
       }
-      final prioritizedCandidates = <String>[];
+
+      final prioritizedPaths = <String>[];
       final prioritizedSeen = <String>{};
       for (final iconPath in uniqueCandidates) {
         var resourceLinkedBitmaps = <String>[];
@@ -704,136 +812,279 @@ class ApkInfo {
           );
           resourceLinkedBitmaps = await adaptiveIconRenderer
               .findBitmapAlternativesForPath(iconPath);
-          if (resourceLinkedBitmaps.isNotEmpty) {
-            log.fine(
-                'loadIcon: XML 资源同条目位图候选($iconPath) => ${resourceLinkedBitmaps.join(", ")}');
-          }
         }
-        // XML（矢量图）优先，位图作为回退
         if (prioritizedSeen.add(iconPath)) {
-          prioritizedCandidates.add(iconPath);
+          prioritizedPaths.add(iconPath);
         }
         for (final bitmap in resourceLinkedBitmaps) {
           if (prioritizedSeen.add(bitmap)) {
-            prioritizedCandidates.add(bitmap);
+            prioritizedPaths.add(bitmap);
           }
         }
       }
-      log.fine('loadIcon: candidates=${prioritizedCandidates.join(", ")}');
 
-      for (final iconPath in prioritizedCandidates) {
+      // 收集有效候选
+      final validPaths = <String>[];
+      for (final iconPath in prioritizedPaths) {
         if (_isBitmapIcon(iconPath)) {
-          final data = await zip.readFileContent(iconPath);
-          if (data != null) {
-            final image = await _decodeImageData(data);
-            if (image != null) {
-              log.fine('loadIcon: 使用图标: $iconPath');
-              return image;
+          if (allFiles.contains(iconPath)) {
+            validPaths.add(iconPath);
+          }
+        } else if (_isXmlPath(iconPath)) {
+          if (allFiles.contains(iconPath)) {
+            validPaths.add(iconPath);
+          }
+        } else {
+          // 资源引用或未知路径，尝试解析
+          final resolvedPaths = _findUnknownCandidatePaths(allFiles, iconPath);
+          if (resolvedPaths.isNotEmpty) {
+            for (final resolved in resolvedPaths) {
+              if (prioritizedSeen.add(resolved)) {
+                validPaths.add(resolved);
+              }
             }
+          } else {
+            // 保留原始路径（可能是资源引用，渲染时由 AdaptiveIconRenderer 处理）
+            validPaths.add(iconPath);
           }
-          log.fine('loadIcon: 找不到图标文件: $iconPath');
-        } else if (iconPath.endsWith('.xml')) {
-          if (aaptPath == null || aaptPath.isEmpty) {
-            log.fine('loadIcon: aapt2 未配置，无法解析 XML 图标: $iconPath');
-            continue;
+        }
+      }
+
+      // 兜底：启发式扫描
+      if (validPaths.isEmpty) {
+        final fallbackCandidates = allFiles
+            .where((e) {
+              final lower = e.toLowerCase();
+              return lower.contains('mipmap') ||
+                  (lower.contains('drawable') && lower.contains('launcher'));
+            })
+            .toSet()
+            .toList()
+          ..sort((a, b) => _unknownPathScore(b).compareTo(_unknownPathScore(a)));
+        for (final candidate in fallbackCandidates) {
+          if (prioritizedSeen.add(candidate)) {
+            validPaths.add(candidate);
           }
-          adaptiveIconRenderer ??= AdaptiveIconRenderer(
+        }
+      }
+
+      // 去除 _round 后缀的变体
+      final filtered = validPaths.where((p) {
+        final lower = p.toLowerCase();
+        return !lower.contains('_round.');
+      }).toList();
+
+      // 构建 IconCandidate 对象，传入已知 DPI
+      final seen = <String>{};
+      for (final p in filtered) {
+        if (seen.add(p)) {
+          iconCandidates.add(IconCandidate.fromPath(p, knownDpi: dpiMap[p]));
+        }
+      }
+
+      log.fine('collectIconCandidates: found ${iconCandidates.length} candidates: ${iconCandidates.map((c) => c.path).join(", ")}');
+    } catch (e) {
+      log.warning('collectIconCandidates: 收集图标候选失败: $e');
+    } finally {
+      adaptiveIconRenderer?.dispose();
+      zip.close();
+    }
+  }
+
+  /// 渲染指定索引的候选图标，结果缓存到 IconCandidate.renderedImage
+  Future<Image?> renderIcon(int index) async {
+    if (index < 0 || index >= iconCandidates.length) return null;
+    final candidate = iconCandidates[index];
+
+    // 已有缓存，直接返回
+    if (candidate.renderedImage != null) return candidate.renderedImage;
+
+    final zip = ZipHelper();
+    AdaptiveIconRenderer? adaptiveIconRenderer;
+    try {
+      await zip.open(apkPath);
+      final aaptPath = CommandTools.findAapt2Path();
+      final iconPath = candidate.path;
+
+      if (_isBitmapIcon(iconPath) || _isBitmapPath(iconPath)) {
+        final data = await zip.readFileContent(iconPath);
+        if (data != null) {
+          final image = await _decodeImageData(data);
+          if (image != null) {
+            candidate.renderedImage = image;
+            log.fine('renderIcon: 渲染位图图标: $iconPath');
+            return image;
+          }
+        }
+      }
+
+      if (_isXmlPath(iconPath)) {
+        if (aaptPath != null && aaptPath.isNotEmpty) {
+          adaptiveIconRenderer = AdaptiveIconRenderer(
             apkPath: apkPath,
             aaptPath: aaptPath,
             zip: zip,
           );
           final image = await adaptiveIconRenderer.render(iconPath);
           if (image != null) {
-            log.fine('loadIcon: 使用 XML 图标: $iconPath');
+            candidate.renderedImage = image;
+            log.fine('renderIcon: 渲染XML图标: $iconPath');
             return image;
           }
-          log.fine('loadIcon: XML 图标解析失败: $iconPath');
-        } else {
-          if (aaptPath != null && aaptPath.isNotEmpty) {
-            adaptiveIconRenderer ??= AdaptiveIconRenderer(
-              apkPath: apkPath,
-              aaptPath: aaptPath,
-              zip: zip,
-            );
-            final rendered = await adaptiveIconRenderer.render(iconPath);
-            if (rendered != null) {
-              log.fine('loadIcon: 使用资源引用图标: $iconPath');
-              return rendered;
-            }
-          }
-
-          final resolvedPaths = _findUnknownCandidatePaths(allFiles, iconPath);
-          for (final resolved in resolvedPaths) {
-            if (_isXmlPath(resolved)) {
-              if (aaptPath == null || aaptPath.isEmpty) continue;
-              adaptiveIconRenderer ??= AdaptiveIconRenderer(
-                apkPath: apkPath,
-                aaptPath: aaptPath,
-                zip: zip,
-              );
-              final rendered = await adaptiveIconRenderer.render(resolved);
-              if (rendered != null) {
-                log.fine('loadIcon: 使用反查XML图标: $resolved (from: $iconPath)');
-                return rendered;
-              }
-              continue;
-            }
-
-            final data = await zip.readFileContent(resolved);
-            if (data == null || data.isEmpty) continue;
-            final image = await _decodeImageData(data);
-            if (image != null) {
-              log.fine('loadIcon: 使用反查位图图标: $resolved (from: $iconPath)');
-              return image;
-            }
-          }
-          log.fine('loadIcon: 不支持的图标格式: $iconPath');
         }
       }
 
-      // 兜底：从 APK 中启发式扫描可能的启动图标资源
-      final fallbackCandidates = allFiles
-          .where((e) {
-            final lower = e.toLowerCase();
-            return lower.contains('mipmap') ||
-                (lower.contains('drawable') && lower.contains('launcher'));
-          })
-          .toSet()
-          .toList()
-        ..sort((a, b) => _unknownPathScore(b).compareTo(_unknownPathScore(a)));
-
-      for (final candidate in fallbackCandidates) {
-        if (_isXmlPath(candidate)) {
-          if (aaptPath == null || aaptPath.isEmpty) continue;
-          adaptiveIconRenderer ??= AdaptiveIconRenderer(
-            apkPath: apkPath,
-            aaptPath: aaptPath,
-            zip: zip,
-          );
-          final rendered = await adaptiveIconRenderer.render(candidate);
-          if (rendered != null) {
-            log.fine('loadIcon: 使用兜底XML图标: $candidate');
-            return rendered;
-          }
-          continue;
-        }
-        final data = await zip.readFileContent(candidate);
-        if (data == null || data.isEmpty) continue;
-        final image = await _decodeImageData(data);
-        if (image != null) {
-          log.fine('loadIcon: 使用兜底位图图标: $candidate');
-          return image;
+      // 尝试作为资源引用渲染
+      if (aaptPath != null && aaptPath.isNotEmpty) {
+        adaptiveIconRenderer ??= AdaptiveIconRenderer(
+          apkPath: apkPath,
+          aaptPath: aaptPath,
+          zip: zip,
+        );
+        final rendered = await adaptiveIconRenderer.render(iconPath);
+        if (rendered != null) {
+          candidate.renderedImage = rendered;
+          log.fine('renderIcon: 渲染资源引用图标: $iconPath');
+          return rendered;
         }
       }
 
-      log.fine('loadIcon: 未找到可用图标');
+      log.fine('renderIcon: 无法渲染图标: $iconPath');
     } catch (e) {
-      log.warning('loadIcon: 加载图标失败: $e');
+      log.warning('renderIcon: 渲染图标失败: $e');
     } finally {
       adaptiveIconRenderer?.dispose();
       zip.close();
     }
     return null;
+  }
+
+  /// 加载APK图标（兼容接口）
+  /// 先收集候选，再渲染第一个可用的
+  Future<Image?> loadIcon() async {
+    await collectIconCandidates();
+    if (iconCandidates.isEmpty) {
+      log.fine('loadIcon: 未找到可用图标');
+      return null;
+    }
+
+    // 按顺序尝试渲染，直到成功
+    for (var i = 0; i < iconCandidates.length; i++) {
+      final image = await renderIcon(i);
+      if (image != null) {
+        return image;
+      }
+    }
+
+    log.fine('loadIcon: 所有候选图标渲染失败');
+    return null;
+  }
+
+  /// 为导出渲染高清图标（XML 矢量图使用更大 canvas + 透明背景）
+  /// 位图图标直接解码原始分辨率
+  Future<Image?> renderIconForExport(int index, {int exportSize = 1024}) async {
+    if (index < 0 || index >= iconCandidates.length) return null;
+    final candidate = iconCandidates[index];
+    final iconPath = candidate.path;
+
+    final zip = ZipHelper();
+    AdaptiveIconRenderer? adaptiveIconRenderer;
+    try {
+      await zip.open(apkPath);
+      final aaptPath = CommandTools.findAapt2Path();
+
+      // 位图：直接解码原始分辨率
+      if (_isBitmapIcon(iconPath) || _isBitmapPath(iconPath)) {
+        final data = await zip.readFileContent(iconPath);
+        if (data != null) {
+          return await _decodeImageData(data);
+        }
+      }
+
+      // XML 矢量图：高分辨率 + 透明背景
+      if (aaptPath != null && aaptPath.isNotEmpty) {
+        adaptiveIconRenderer = AdaptiveIconRenderer(
+          apkPath: apkPath,
+          aaptPath: aaptPath,
+          zip: zip,
+        );
+        return await adaptiveIconRenderer.render(
+          iconPath,
+          canvasSize: exportSize,
+          transparentBackground: true,
+        );
+      }
+    } catch (e) {
+      log.warning('renderIconForExport: 导出渲染失败: $e');
+    } finally {
+      adaptiveIconRenderer?.dispose();
+      zip.close();
+    }
+    return null;
+  }
+
+  /// 将指定索引的 XML 矢量图标候选导出为 SVG 字符串。
+  /// 支持解析 adaptive-icon 中引用的 vector drawable。
+  Future<String?> exportSvgString(int index) async {
+    if (index < 0 || index >= iconCandidates.length) return null;
+    final candidate = iconCandidates[index];
+    if (candidate.type != IconCandidateType.xmlVector) return null;
+
+    final zip = ZipHelper();
+    AdaptiveIconRenderer? renderer;
+    try {
+      await zip.open(apkPath);
+      final aaptPath = CommandTools.findAapt2Path();
+      if (aaptPath == null || aaptPath.isEmpty) {
+        // 无 aapt 时直接读取 XML 字节尝试转换
+        final bytes = await zip.readFileContent(candidate.path);
+        if (bytes != null) {
+          return VectorToSvg.convert(bytes);
+        }
+        return null;
+      }
+
+      renderer = AdaptiveIconRenderer(
+        apkPath: apkPath,
+        aaptPath: aaptPath,
+        zip: zip,
+      );
+
+      // 优先尝试 adaptive-icon 完整导出（包含 background + foreground）
+      final adaptiveData =
+          await renderer.resolveAdaptiveIconForSvg(candidate.path);
+      if (adaptiveData != null) {
+        if (adaptiveData.backgroundVector != null) {
+          await renderer
+              .resolveVectorColorRefs(adaptiveData.backgroundVector!);
+          await renderer
+              .resolveVectorGradientRefs(adaptiveData.backgroundVector!);
+        }
+        if (adaptiveData.foregroundVector != null) {
+          await renderer
+              .resolveVectorColorRefs(adaptiveData.foregroundVector!);
+          await renderer
+              .resolveVectorGradientRefs(adaptiveData.foregroundVector!);
+        }
+        return VectorToSvg.convertAdaptiveIconData(adaptiveData);
+      }
+
+      // 回退：单个 vector drawable 导出
+      final vectorElement =
+          await renderer.resolveToVectorElement(candidate.path);
+      if (vectorElement != null) {
+        await renderer.resolveVectorColorRefs(vectorElement);
+        await renderer.resolveVectorGradientRefs(vectorElement);
+        return VectorToSvg.convertElement(vectorElement);
+      }
+      return null;
+    } catch (e) {
+      log.warning('exportSvgString: SVG 导出失败: $e');
+      return null;
+    } finally {
+      renderer?.dispose();
+      zip.close();
+    }
   }
 
   @override
@@ -843,7 +1094,11 @@ class ApkInfo {
 
   /// 释放持有的 GPU 资源（dart:ui.Image）
   void dispose() {
-    mainIconImage?.dispose();
+    for (final candidate in iconCandidates) {
+      candidate.dispose();
+    }
+    iconCandidates.clear();
+    // mainIconImage 指向某个候选的 renderedImage，已在上面释放
     mainIconImage = null;
   }
 
@@ -863,7 +1118,10 @@ class ApkInfo {
     targetSdkVersion = null;
     label = null;
     mainIconPath = null;
-    mainIconImage?.dispose();
+    for (final candidate in iconCandidates) {
+      candidate.dispose();
+    }
+    iconCandidates.clear();
     mainIconImage = null;
     labels.clear();
     usesPermissions.clear();

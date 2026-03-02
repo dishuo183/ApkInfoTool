@@ -119,6 +119,18 @@
     "signature_info": "Signature Info",
     "text_info": "Text Info"
   },
+  "icon": {
+    "switch_icon": "Switch Icon",
+    "export_as_png": "Export as PNG",
+    "export_as_svg": "Export as SVG",
+    "export_original": "Export Original File",
+    "export_icon": "Export Icon",
+    "export_success": "Icon exported successfully",
+    "export_failed": "Export failed: {error}",
+    "bitmap_label": "{format} ({dpi})",
+    "vector_label": "XML Vector ({dpi})",
+    "loading": "Loading..."
+  },
   "rename": {
     "rename_file": "Rename File",
     "app_name_only": "App Name Only",

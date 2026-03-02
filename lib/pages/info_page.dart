@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:apk_info_tool/apkparser/apk_info.dart';
 import 'package:apk_info_tool/gen/strings.g.dart';
@@ -15,6 +16,7 @@ import 'package:apk_info_tool/utils/file_hash.dart';
 import 'package:apk_info_tool/utils/format.dart';
 import 'package:apk_info_tool/utils/logger.dart';
 import 'package:apk_info_tool/utils/platform.dart';
+import 'package:apk_info_tool/utils/zip_helper.dart';
 import 'package:apk_info_tool/widgets/title_value_layout.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
@@ -69,6 +71,7 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
   void closeApk() {
     ref.read(currentFileStateProvider.notifier).update(FileState());
     ref.read(currentApkInfoProvider.notifier).reset();
+    ref.read(selectedIconIndexProvider.notifier).reset();
   }
 
   String getSdkVersionText(int? sdkVersion) {
@@ -85,6 +88,7 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
     final enableHash =
         ref.read(settingStateProvider.select((value) => value.enableHash));
     apkInfoState.reset();
+    ref.read(selectedIconIndexProvider.notifier).reset();
     isParsingState.update(true);
 
     // 初始化文件状态
@@ -427,28 +431,7 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
                                     )),
                                 ],
                               )),
-                              () {
-                                final iconSize =
-                                    iconRowSpan * 44.0;
-                                final radius = iconSize * 0.22;
-                                return SizedBox(
-                                  width: iconSize,
-                                  height: iconSize,
-                                  child: Card(
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius:
-                                          BorderRadius.circular(
-                                              radius),
-                                    ),
-                                    clipBehavior: Clip.antiAlias,
-                                    child: RawImage(
-                                      image:
-                                          apkInfo?.mainIconImage,
-                                      fit: BoxFit.contain,
-                                    ),
-                                  ),
-                                );
-                              }(),
+                              _buildIconWidget(apkInfo, iconRowSpan),
                             ],
                           ),
                           if (iconRowSpan < 3)
@@ -729,6 +712,284 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
       ref
           .read(pageActionsProvider.notifier)
           .setActions(_buildActions(fileState));
+    }
+  }
+
+  Widget _buildIconWidget(ApkInfo? apkInfo, int iconRowSpan) {
+    final iconSize = iconRowSpan * 44.0;
+    final radius = iconSize * 0.22;
+    return GestureDetector(
+      onSecondaryTapUp: (details) {
+        if (apkInfo != null) {
+          _showIconContextMenu(context, details.globalPosition, apkInfo);
+        }
+      },
+      child: SizedBox(
+        width: iconSize,
+        height: iconSize,
+        child: Card(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(radius),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: RawImage(
+            image: apkInfo?.mainIconImage,
+            fit: BoxFit.contain,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showIconContextMenu(
+      BuildContext context, Offset position, ApkInfo apkInfo) {
+    final candidates = apkInfo.iconCandidates;
+    final selectedIndex = ref.read(selectedIconIndexProvider);
+
+    final items = <PopupMenuEntry<String>>[];
+
+    // 切换图标分组（仅多候选时显示）
+    if (candidates.length > 1) {
+      for (int i = 0; i < candidates.length; i++) {
+        items.add(PopupMenuItem(
+          height: 32,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          value: 'select_$i',
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                i == selectedIndex
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_unchecked,
+                size: 16,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                candidates[i].displayLabel,
+                style: const TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
+        ));
+      }
+      items.add(const PopupMenuDivider());
+    }
+
+    // 导出分组
+    items.add(_buildMenuItem(
+        'export_png', Icons.image, t.icon.export_as_png,
+        enabled: apkInfo.mainIconImage != null));
+
+    // SVG 导出（仅 XML 矢量图候选可用）
+    final isXmlVector = selectedIndex >= 0 &&
+        selectedIndex < candidates.length &&
+        candidates[selectedIndex].type == IconCandidateType.xmlVector;
+    items.add(_buildMenuItem(
+        'export_svg', Icons.code, t.icon.export_as_svg,
+        enabled: apkInfo.mainIconImage != null && isXmlVector));
+
+    items.add(_buildMenuItem(
+        'export_original', Icons.file_download, t.icon.export_original,
+        enabled: apkInfo.mainIconImage != null));
+
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(position.dx, position.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      popUpAnimationStyle: AnimationStyle.noAnimation,
+      items: items,
+    ).then((value) {
+      if (value != null) {
+        _handleIconMenuAction(value, apkInfo);
+      }
+    });
+  }
+
+  Future<void> _handleIconMenuAction(String value, ApkInfo apkInfo) async {
+    if (value.startsWith('select_')) {
+      final index = int.parse(value.substring(7));
+      await _switchIcon(apkInfo, index);
+    } else if (value == 'export_png') {
+      await _exportAsPng(apkInfo);
+    } else if (value == 'export_svg') {
+      await _exportAsSvg(apkInfo);
+    } else if (value == 'export_original') {
+      await _exportOriginal(apkInfo);
+    }
+  }
+
+  Future<void> _switchIcon(ApkInfo apkInfo, int index) async {
+    if (index < 0 || index >= apkInfo.iconCandidates.length) return;
+    final candidate = apkInfo.iconCandidates[index];
+
+    if (candidate.renderedImage != null) {
+      apkInfo.mainIconImage = candidate.renderedImage;
+      ref.read(selectedIconIndexProvider.notifier).select(index);
+      setState(() {});
+    } else {
+      // 异步渲染
+      final image = await apkInfo.renderIcon(index);
+      if (image != null && mounted) {
+        apkInfo.mainIconImage = image;
+        ref.read(selectedIconIndexProvider.notifier).select(index);
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _exportAsPng(ApkInfo apkInfo) async {
+    final selectedIndex = ref.read(selectedIconIndexProvider);
+
+    try {
+      // 使用高清渲染导出（XML 矢量图 1024x1024 + 透明背景）
+      ui.Image? exportImage;
+      bool needDisposeExport = false;
+      if (selectedIndex >= 0 &&
+          selectedIndex < apkInfo.iconCandidates.length) {
+        exportImage = await apkInfo.renderIconForExport(selectedIndex);
+        if (exportImage != null) {
+          needDisposeExport = true;
+        }
+      }
+      // 回退到当前显示图标
+      exportImage ??= apkInfo.mainIconImage;
+      if (exportImage == null) return;
+
+      final byteData =
+          await exportImage.toByteData(format: ui.ImageByteFormat.png);
+      // 如果是新渲染的导出图，释放它
+      if (needDisposeExport) {
+        exportImage.dispose();
+      }
+      if (byteData == null) return;
+
+      final fileName = '${apkInfo.label ?? "icon"}_icon.png';
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: t.icon.export_icon,
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: ['png'],
+        lockParentWindow: true,
+      );
+      if (savePath == null) return;
+
+      await File(savePath).writeAsBytes(byteData.buffer.asUint8List());
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.icon.export_success)),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.icon.export_failed(error: e.toString()))),
+        );
+      }
+    }
+  }
+
+  Future<void> _exportAsSvg(ApkInfo apkInfo) async {
+    final selectedIndex = ref.read(selectedIconIndexProvider);
+
+    try {
+      final svgString = await apkInfo.exportSvgString(selectedIndex);
+      if (svgString == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+                content:
+                    Text(t.icon.export_failed(error: 'SVG conversion failed'))),
+          );
+        }
+        return;
+      }
+
+      final fileName = '${apkInfo.label ?? "icon"}_icon.svg';
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: t.icon.export_icon,
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: ['svg'],
+        lockParentWindow: true,
+      );
+      if (savePath == null) return;
+
+      await File(savePath).writeAsString(svgString);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.icon.export_success)),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.icon.export_failed(error: e.toString()))),
+        );
+      }
+    }
+  }
+
+  Future<void> _exportOriginal(ApkInfo apkInfo) async {
+    final selectedIndex = ref.read(selectedIconIndexProvider);
+
+    try {
+      Uint8List? bytes;
+      String ext = '.png';
+
+      // 尝试从 APK 中读取原始文件字节
+      if (selectedIndex >= 0 &&
+          selectedIndex < apkInfo.iconCandidates.length) {
+        final candidate = apkInfo.iconCandidates[selectedIndex];
+        if (candidate.rawBytes == null) {
+          final zip = ZipHelper();
+          try {
+            await zip.open(apkInfo.apkPath);
+            candidate.rawBytes = await zip.readFileContent(candidate.path);
+          } finally {
+            zip.close();
+          }
+        }
+        if (candidate.rawBytes != null) {
+          bytes = candidate.rawBytes;
+          ext = path.extension(candidate.path);
+        }
+      }
+
+      // 回退：无法获取原始字节（如 XAPK/APKM），导出渲染后的 PNG
+      if (bytes == null) {
+        final image = apkInfo.mainIconImage;
+        if (image == null) return;
+        final byteData =
+            await image.toByteData(format: ui.ImageByteFormat.png);
+        if (byteData == null) return;
+        bytes = byteData.buffer.asUint8List();
+        ext = '.png';
+      }
+
+      final fileName = '${apkInfo.label ?? "icon"}_icon$ext';
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: t.icon.export_icon,
+        fileName: fileName,
+        lockParentWindow: true,
+      );
+      if (savePath == null) return;
+
+      await File(savePath).writeAsBytes(bytes);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.icon.export_success)),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t.icon.export_failed(error: e.toString()))),
+        );
+      }
     }
   }
 

@@ -11,6 +11,24 @@ import 'package:apk_info_tool/utils/zip_helper.dart';
 import 'package:path_drawing/path_drawing.dart';
 import 'package:xml/xml.dart' as xml;
 
+/// Adaptive icon 导出 SVG 时的结构化数据
+class AdaptiveIconSvgData {
+  final String? backgroundColor; // #AARRGGBB hex
+  final xml.XmlElement? backgroundVector;
+  final xml.XmlElement? foregroundVector;
+
+  AdaptiveIconSvgData({
+    this.backgroundColor,
+    this.backgroundVector,
+    this.foregroundVector,
+  });
+
+  bool get hasContent =>
+      backgroundColor != null ||
+      backgroundVector != null ||
+      foregroundVector != null;
+}
+
 class AdaptiveIconRenderer {
   AdaptiveIconRenderer({
     required this.apkPath,
@@ -103,9 +121,15 @@ class AdaptiveIconRenderer {
   int _vectorPathStroked = 0;
   int _resolvedRefCount = 0;
 
-  Future<Image?> render(String iconPath) async {
+  Future<Image?> render(
+    String iconPath, {
+    int? canvasSize,
+    bool transparentBackground = false,
+  }) async {
     final normalized = _normalizeZipPath(iconPath);
     if (normalized.isEmpty) return null;
+
+    final size = canvasSize ?? _kCanvasSize;
 
     try {
       _didDraw = false;
@@ -117,17 +141,19 @@ class AdaptiveIconRenderer {
       _vectorPathFilled = 0;
       _vectorPathStroked = 0;
       _resolvedRefCount = 0;
-      _debug('render start: iconPath=$normalized, apkPath=$apkPath');
+      _debug('render start: iconPath=$normalized, apkPath=$apkPath, canvasSize=$size');
       final recorder = PictureRecorder();
       final canvas = Canvas(recorder);
       final rect = Rect.fromLTWH(
         0,
         0,
-        _kCanvasSize.toDouble(),
-        _kCanvasSize.toDouble(),
+        size.toDouble(),
+        size.toDouble(),
       );
-      // 绘制白色底色：避免透明背景在深色主题下显示为黑色
-      canvas.drawRect(rect, Paint()..color = const Color(0xFFFFFFFF));
+      if (!transparentBackground) {
+        // 绘制白色底色：避免透明背景在深色主题下显示为黑色
+        canvas.drawRect(rect, Paint()..color = const Color(0xFFFFFFFF));
+      }
       await _renderDrawable(canvas, rect, normalized, 0);
       if (!_didDraw) {
         _debug('render end: no drawing happened');
@@ -136,13 +162,326 @@ class AdaptiveIconRenderer {
       final picture = recorder.endRecording();
       _debug(
           'render end: drawn=true fills=$_drawFillCount strokes=$_drawStrokeCount rects=$_drawRectCount bitmaps=$_drawBitmapCount vectorPath(total=$_vectorPathTotal, filled=$_vectorPathFilled, stroked=$_vectorPathStroked) refs=$_resolvedRefCount');
-      final image = await picture.toImage(_kCanvasSize, _kCanvasSize);
+      final image = await picture.toImage(size, size);
       picture.dispose();
       return image;
     } catch (e) {
       log.warning('AdaptiveIconRenderer.render failed: $e');
       return null;
     }
+  }
+
+  /// 将图标路径解析为底层的 vector drawable XML 元素。
+  /// 对于 adaptive-icon XML，会跟踪 foreground drawable 引用。
+  /// 如果找不到 vector drawable，返回 null。
+  Future<xml.XmlElement?> resolveToVectorElement(String iconPath) async {
+    final normalized = _normalizeZipPath(iconPath);
+    if (normalized.isEmpty) return null;
+    if (!normalized.toLowerCase().endsWith('.xml')) return null;
+
+    final root = await _loadXmlRoot(normalized);
+    if (root == null) return null;
+
+    final tag = root.name.local.toLowerCase();
+    if (tag == 'vector') return root;
+
+    if (tag == 'adaptive-icon') {
+      // 优先从 foreground 层查找
+      final foreground = _findDirectChild(root, 'foreground');
+      if (foreground != null) {
+        final result = await _resolveContainerToVector(foreground, 0);
+        if (result != null) return result;
+      }
+
+      // 回退到 background 层
+      final background = _findDirectChild(root, 'background');
+      if (background != null) {
+        final result = await _resolveContainerToVector(background, 0);
+        if (result != null) return result;
+      }
+    }
+
+    return null;
+  }
+
+  /// 将 adaptive-icon 图标路径解析为包含 background 和 foreground 的完整结构。
+  /// 用于 SVG 导出时保留所有图层信息。
+  Future<AdaptiveIconSvgData?> resolveAdaptiveIconForSvg(
+      String iconPath) async {
+    final normalized = _normalizeZipPath(iconPath);
+    if (normalized.isEmpty ||
+        !normalized.toLowerCase().endsWith('.xml')) {
+      return null;
+    }
+
+    final root = await _loadXmlRoot(normalized);
+    if (root == null ||
+        root.name.local.toLowerCase() != 'adaptive-icon') {
+      return null;
+    }
+
+    String? bgColor;
+    xml.XmlElement? bgVector;
+    xml.XmlElement? fgVector;
+
+    // 解析 background 层
+    final background = _findDirectChild(root, 'background');
+    if (background != null) {
+      // 先尝试解析为 vector drawable
+      bgVector = await _resolveContainerToVector(background, 0);
+      if (bgVector == null) {
+        // 尝试解析为纯色
+        final drawableRef =
+            _attr(background, 'drawable') ?? _findDrawableLikeValue(background);
+        if (drawableRef != null && drawableRef.isNotEmpty) {
+          final color = await _resolveColorRef(drawableRef, 0);
+          if (color != null) {
+            bgColor =
+                '#${(color.toARGB32() & 0xffffffff).toRadixString(16).padLeft(8, '0')}';
+          }
+        }
+      }
+    }
+
+    // 解析 foreground 层
+    final foreground = _findDirectChild(root, 'foreground');
+    if (foreground != null) {
+      fgVector = await _resolveContainerToVector(foreground, 0);
+    }
+
+    if (bgColor == null && bgVector == null && fgVector == null) {
+      return null;
+    }
+
+    return AdaptiveIconSvgData(
+      backgroundColor: bgColor,
+      backgroundVector: bgVector,
+      foregroundVector: fgVector,
+    );
+  }
+
+  Future<xml.XmlElement?> _resolveContainerToVector(
+      xml.XmlElement container, int depth) async {
+    if (depth > _kMaxDepth) return null;
+
+    // 检查内联 vector 子元素
+    final vectorChild = _findDirectChild(container, 'vector');
+    if (vectorChild != null) return vectorChild;
+
+    // 解析 drawable 属性引用
+    final drawableRef = _attr(container, 'drawable');
+    if (drawableRef != null && drawableRef.isNotEmpty) {
+      final resolvedPath = await _resolveDrawableToPath(drawableRef, depth + 1);
+      if (resolvedPath != null &&
+          resolvedPath.toLowerCase().endsWith('.xml')) {
+        final resolvedRoot = await _loadXmlRoot(resolvedPath);
+        if (resolvedRoot != null) {
+          final resolvedTag = resolvedRoot.name.local.toLowerCase();
+          if (resolvedTag == 'vector') return resolvedRoot;
+          // 递归处理嵌套的 adaptive-icon 或其他容器
+          if (resolvedTag == 'adaptive-icon') {
+            final fg = _findDirectChild(resolvedRoot, 'foreground');
+            if (fg != null) {
+              final result = await _resolveContainerToVector(fg, depth + 1);
+              if (result != null) return result;
+            }
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /// 解析 vector drawable 元素中的资源引用颜色。
+  /// 将 `@...` 颜色引用替换为 `#AARRGGBB` 格式的实际颜色值。
+  Future<void> resolveVectorColorRefs(xml.XmlElement vector) async {
+    await _resolveElementColors(vector, 0);
+  }
+
+  Future<void> _resolveElementColors(
+      xml.XmlElement element, int depth) async {
+    if (depth > _kMaxDepth) return;
+    final tag = element.name.local.toLowerCase();
+
+    if (tag == 'path') {
+      await _resolveColorAttrs(
+          element, ['fillColor', 'strokeColor'], depth);
+    } else if (tag == 'vector' || tag == 'group') {
+      for (final child in element.childElements) {
+        await _resolveElementColors(child, depth + 1);
+      }
+    }
+  }
+
+  Future<void> _resolveColorAttrs(
+      xml.XmlElement element, List<String> attrNames, int depth) async {
+    for (final attrName in attrNames) {
+      final value = _attr(element, attrName);
+      if (value == null || value.isEmpty) continue;
+
+      // 已经是 #AARRGGBB 格式的颜色 → VectorToSvg 可以直接处理
+      if (_isColorLiteral(value.trim())) continue;
+
+      // 尝试解析所有格式：Android 整数字面量、@ref 资源引用等
+      final resolved = await _resolveColorRef(value, depth + 1);
+      if (resolved != null) {
+        final hexColor =
+            '#${(resolved.toARGB32() & 0xffffffff).toRadixString(16).padLeft(8, '0')}';
+        for (final attr in element.attributes) {
+          if (attr.name.local == attrName) {
+            element.setAttribute(attr.name.qualified, hexColor);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  /// 解析 vector drawable 元素中的渐变资源引用。
+  /// 将 `@...` 渐变引用解析并嵌入为 `<resolvedGradient>` 子元素，
+  /// 供 VectorToSvg 转换为 SVG 渐变定义。
+  Future<void> resolveVectorGradientRefs(xml.XmlElement vector) async {
+    await _resolveElementGradients(vector, 0);
+  }
+
+  Future<void> _resolveElementGradients(
+      xml.XmlElement element, int depth) async {
+    if (depth > _kMaxDepth) return;
+    final tag = element.name.local.toLowerCase();
+
+    if (tag == 'path') {
+      await _resolveGradientAttr(element, 'fillColor', depth);
+    } else if (tag == 'vector' || tag == 'group') {
+      for (final child in element.childElements) {
+        await _resolveElementGradients(child, depth + 1);
+      }
+    }
+  }
+
+  Future<void> _resolveGradientAttr(
+      xml.XmlElement element, String attrName, int depth) async {
+    final value = _attr(element, attrName);
+    if (value == null || value.isEmpty) return;
+
+    final trimmed = value.trim();
+    // 已经是颜色值 → 不需要处理
+    if (_isColorLiteral(trimmed)) return;
+    if (_isAndroidIntLiteral(trimmed)) return;
+    if (trimmed.startsWith('#')) return;
+    // 不是资源引用 → 跳过
+    if (!trimmed.startsWith('@')) return;
+
+    // 解析资源引用，查找是否指向渐变 XML
+    final resolved = await _resolveResourceReference(trimmed, depth + 1);
+    if (resolved == null || resolved == trimmed) return;
+    if (!resolved.toLowerCase().endsWith('.xml')) return;
+
+    final root = await _loadXmlRoot(resolved);
+    if (root == null) return;
+    if (root.name.local.toLowerCase() != 'gradient') return;
+
+    // 构建嵌入的渐变元素
+    final gradientElement =
+        await _buildSvgGradientElement(root, depth + 1);
+    if (gradientElement == null) return;
+
+    // 将渐变元素嵌入 path，标记 fillColor 为 __gradient__
+    element.children.add(gradientElement);
+    for (final attr in element.attributes) {
+      if (attr.name.local == attrName) {
+        element.setAttribute(attr.name.qualified, '__gradient__');
+        break;
+      }
+    }
+  }
+
+  Future<xml.XmlElement?> _buildSvgGradientElement(
+      xml.XmlElement root, int depth) async {
+    if (depth > _kMaxDepth) return null;
+
+    final gradientType = (_attr(root, 'type') ?? 'linear').toLowerCase();
+    final type = _parseGradientType(gradientType);
+
+    final colors = <String>[];
+    final offsets = <double>[];
+
+    // 从 <item> 子元素解析 stop
+    for (final item
+        in root.childElements.where((e) => e.name.local == 'item')) {
+      final colorValue = _attr(item, 'color');
+      final color = await _resolveColorRef(colorValue, depth + 1);
+      if (color == null) continue;
+      colors.add(
+          '#${(color.toARGB32() & 0xffffffff).toRadixString(16).padLeft(8, '0')}');
+      offsets.add(_parseDimension(_attr(item, 'offset')));
+    }
+
+    // 回退：从 startColor/centerColor/endColor 属性解析
+    if (colors.isEmpty) {
+      final startColor =
+          await _resolveColorRef(_attr(root, 'startColor'), depth + 1);
+      final centerColor =
+          await _resolveColorRef(_attr(root, 'centerColor'), depth + 1);
+      final endColor =
+          await _resolveColorRef(_attr(root, 'endColor'), depth + 1);
+      if (startColor != null && endColor != null) {
+        colors.add(
+            '#${(startColor.toARGB32() & 0xffffffff).toRadixString(16).padLeft(8, '0')}');
+        offsets.add(0);
+        if (centerColor != null) {
+          colors.add(
+              '#${(centerColor.toARGB32() & 0xffffffff).toRadixString(16).padLeft(8, '0')}');
+          offsets.add(0.5);
+        }
+        colors.add(
+            '#${(endColor.toARGB32() & 0xffffffff).toRadixString(16).padLeft(8, '0')}');
+        offsets.add(1);
+      }
+    }
+
+    if (colors.length < 2) return null;
+
+    // 构建 XML 元素
+    final elem = xml.XmlElement(xml.XmlName('resolvedGradient'));
+    switch (type) {
+      case _GradientType.linear:
+        elem.setAttribute('type', 'linear');
+        elem.setAttribute(
+            'startX', _parseDimension(_attr(root, 'startX')).toString());
+        elem.setAttribute(
+            'startY', _parseDimension(_attr(root, 'startY')).toString());
+        elem.setAttribute(
+            'endX', _parseDimension(_attr(root, 'endX')).toString());
+        elem.setAttribute(
+            'endY', _parseDimension(_attr(root, 'endY')).toString());
+        break;
+      case _GradientType.radial:
+        elem.setAttribute('type', 'radial');
+        elem.setAttribute(
+            'centerX', _parseDimension(_attr(root, 'centerX')).toString());
+        elem.setAttribute(
+            'centerY', _parseDimension(_attr(root, 'centerY')).toString());
+        elem.setAttribute('gradientRadius',
+            _parseDimension(_attr(root, 'gradientRadius')).toString());
+        break;
+      case _GradientType.sweep:
+        elem.setAttribute('type', 'sweep');
+        elem.setAttribute(
+            'centerX', _parseDimension(_attr(root, 'centerX')).toString());
+        elem.setAttribute(
+            'centerY', _parseDimension(_attr(root, 'centerY')).toString());
+        break;
+    }
+
+    for (int i = 0; i < colors.length; i++) {
+      final stop = xml.XmlElement(xml.XmlName('stop'));
+      stop.setAttribute('offset', offsets[i].toString());
+      stop.setAttribute('color', colors[i]);
+      elem.children.add(stop);
+    }
+
+    return elem;
   }
 
   Future<List<String>> findBitmapAlternativesForPath(String filePath) async {

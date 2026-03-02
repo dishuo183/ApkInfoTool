@@ -22,6 +22,15 @@ class CurrentApkInfo extends _$CurrentApkInfo {
 }
 
 @Riverpod(keepAlive: true)
+class SelectedIconIndex extends _$SelectedIconIndex {
+  @override
+  int build() => 0;
+
+  void select(int index) => state = index;
+  void reset() => state = 0;
+}
+
+@Riverpod(keepAlive: true)
 class IsParsing extends _$IsParsing {
   @override
   bool build() {

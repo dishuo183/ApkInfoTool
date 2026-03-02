@@ -119,6 +119,18 @@
     "signature_info": "签名信息",
     "text_info": "文本信息"
   },
+  "icon": {
+    "switch_icon": "切换图标",
+    "export_as_png": "导出为 PNG",
+    "export_as_svg": "导出为 SVG",
+    "export_original": "导出原始文件",
+    "export_icon": "导出图标",
+    "export_success": "图标导出成功",
+    "export_failed": "导出失败: {error}",
+    "bitmap_label": "{format} ({dpi})",
+    "vector_label": "XML 矢量图 ({dpi})",
+    "loading": "加载中..."
+  },
   "rename": {
     "rename_file": "重命名文件",
     "app_name_only": "仅应用名",

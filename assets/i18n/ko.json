@@ -119,6 +119,18 @@
     "signature_info": "서명 정보",
     "text_info": "텍스트 정보"
   },
+  "icon": {
+    "switch_icon": "아이콘 전환",
+    "export_as_png": "PNG로 내보내기",
+    "export_as_svg": "SVG로 내보내기",
+    "export_original": "원본 파일 내보내기",
+    "export_icon": "아이콘 내보내기",
+    "export_success": "아이콘 내보내기 성공",
+    "export_failed": "내보내기 실패: {error}",
+    "bitmap_label": "{format} ({dpi})",
+    "vector_label": "XML 벡터 ({dpi})",
+    "loading": "로딩 중..."
+  },
   "rename": {
     "rename_file": "파일 이름 바꾸기",
     "app_name_only": "앱 이름만",
