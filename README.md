@@ -8,13 +8,18 @@
 
 - 查看 APK/XAPK/APKM/APKS 基本信息（包名、版本、SDK、权限等）
 - XAPK/APKM/APKS 分包信息展示（Split APK 列表、OBB 列表）
-- 图标显示（PNG/WebP/XML 自适应图标，XAPK/APKM/APKS 支持 icon.png 或 manifest 指定路径）
+- 图标显示（PNG/WebP/XML 自适应图标，支持渐变填充等复杂矢量图标）
+- 图标显示大小可配置（2行/3行）
+- 签名信息查看、文件哈希计算（MD5/SHA1）
 - 文件重命名（APK/XAPK/APKM/APKS）
 - 通过 ADB 安装（支持 split APK 与 OBB 推送）
+- 内置工具下载（可在设置中直接下载 adb/aapt2/apksigner，无需手动安装 Android SDK）
+- 主题颜色自定义
+- 多语言支持（简体中文、繁體中文、English、日本語、한국어）
 
 ## 已知问题
 - 某些 APK/XAPK/APKM/APKS 解析速度慢：使用 aapt2 解析 base.apk，速度依赖于 aapt2 的性能表现。
-- 某些 APK 图标显示不完全一致：已支持 PNG、WebP 及 XML 自适应图标的解析与渲染，但对于特殊或复杂的自适应图标，显示效果可能与实际设备上有所差异。
+- 某些 APK 图标显示不完全一致：已支持 PNG、WebP 及 XML 自适应图标（含渐变填充）的解析与渲染，但对于特殊或复杂的自适应图标，显示效果可能与实际设备上有所差异。
 - macOS 因沙箱原因，有以下问题
   - 重命名功能无法工作
   - 无法指定外部的 adb 和 aapt2，只能使用内置的
@@ -41,7 +46,7 @@
    sdkmanager "build-tools;35.0.0" "platform-tools"
    ```
 
-请确保这些工具在系统的环境变量中可访问并在设置指定路径。
+请确保这些工具在系统的环境变量中可访问并在设置中指定路径。也可以在设置中使用内置的下载功能自动获取这些工具。
 
 ## 下载安装
 
@@ -87,7 +92,11 @@ flutter build linux # Linux
 本应用支持以下语言：
 
 - 简体中文
+- 繁體中文（香港）
+- 繁體中文（台灣）
 - English
+- 日本語
+- 한국어
 
 语言文件位于 `assets/i18n` 目录下。
 

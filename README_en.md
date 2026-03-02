@@ -8,13 +8,18 @@ A simple tool for viewing APK/XAPK/APKM/APKS file information and installation.
 
 - View APK/XAPK/APKM/APKS basic information (package, version, SDK, permissions, etc.)
 - Show XAPK/APKM/APKS split details (split APK list, OBB list)
-- Icon preview (PNG/WebP/XML adaptive icons, XAPK/APKM/APKS supports icon.png or manifest path)
+- Icon preview (PNG/WebP/XML adaptive icons, including gradient-filled vector icons)
+- Configurable icon display size (2 or 3 rows)
+- Signature info viewer and file hash calculation (MD5/SHA1)
 - File renaming (APK/XAPK/APKM/APKS)
 - Install via ADB (split APK install and OBB push supported)
+- Built-in tool downloader (download adb/aapt2/apksigner directly from settings, no manual Android SDK setup needed)
+- Customizable theme color
+- Multi-language support (Simplified Chinese, Traditional Chinese, English, Japanese, Korean)
 
 ## Known Issues
 - Slow parsing of certain APK/XAPK/APKM/APKS: This tool uses aapt2 to parse APK, and speed depends on aapt2's performance.
-- Some APK icons may not display exactly as expected: PNG, WebP and XML adaptive icon parsing and rendering are now supported, but special or complex adaptive icons may appear slightly different from the actual device display.
+- Some APK icons may not display exactly as expected: PNG, WebP and XML adaptive icon parsing and rendering (including gradient fills) are now supported, but special or complex adaptive icons may appear slightly different from the actual device display.
 - Due to sandbox restrictions on macOS, there are the following issues:
   - Rename function does not work
   - Cannot specify external adb and aapt2, can only use built-in ones
@@ -41,7 +46,7 @@ You can obtain these tools by:
    sdkmanager "build-tools;35.0.0" "platform-tools"
    ```
 
-Please ensure these tools are accessible in your system's environment variables and specify their paths in settings.
+Please ensure these tools are accessible in your system's environment variables and specify their paths in settings. You can also use the built-in download feature in settings to automatically obtain these tools.
 
 ## Download & Installation
 
@@ -87,7 +92,11 @@ flutter build linux # Linux
 The application supports the following languages:
 
 - Simplified Chinese
+- Traditional Chinese (Hong Kong)
+- Traditional Chinese (Taiwan)
 - English
+- Japanese
+- Korean
 
 Language files are located in the `assets/i18n` directory.
 
