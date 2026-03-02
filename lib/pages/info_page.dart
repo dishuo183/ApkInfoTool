@@ -38,7 +38,7 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
     var result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       dialogTitle: t.open.select_apk_file,
-      allowedExtensions: ['apk', 'xapk', 'apkm', 'apks'],
+      allowedExtensions: ['apk', 'xapk', 'apkm', 'apks', 'zip'],
       lockParentWindow: true,
     );
     log.fine('openFilePicker: result=$result');
@@ -347,7 +347,8 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
               if (extension.endsWith('.apk') ||
                   extension.endsWith('.xapk') ||
                   extension.endsWith('.apkm') ||
-                  extension.endsWith('.apks')) {
+                  extension.endsWith('.apks') ||
+                  extension.endsWith('.zip')) {
                 openApk(file.path);
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -642,7 +643,8 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
                 if (!(value.toLowerCase().endsWith('.apk') ||
                     value.toLowerCase().endsWith('.xapk') ||
                     value.toLowerCase().endsWith('.apkm') ||
-                    value.toLowerCase().endsWith('.apks'))) {
+                    value.toLowerCase().endsWith('.apks') ||
+                    value.toLowerCase().endsWith('.zip'))) {
                   return t.rename.must_end_with_apk;
                 }
                 return null;

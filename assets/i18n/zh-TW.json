@@ -18,11 +18,11 @@
     "page_in_development": "頁面開發中"
   },
   "open": {
-    "open_apk": "開啟 APK/XAPK/APKM/APKS",
+    "open_apk": "開啟 APK/XAPK/APKM/APKS/ZIP",
     "open_file_directory": "開啟檔案位置",
-    "select_apk_file": "請選擇 APK/XAPK/APKM/APKS 檔案",
+    "select_apk_file": "請選擇 APK/XAPK/APKM/APKS/ZIP 檔案",
     "close_file": "關閉檔案",
-    "invalid_file_type": "請選擇 APK/XAPK/APKM/APKS 檔案"
+    "invalid_file_type": "請選擇 APK/XAPK/APKM/APKS/ZIP 檔案"
   },
   "settings": {
     "title": "設定",

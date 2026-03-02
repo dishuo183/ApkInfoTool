@@ -2,23 +2,23 @@
 
 [简体中文](README.md) | [English](README_en.md)
 
-A simple tool for viewing APK/XAPK/APKM/APKS file information and installation.
+A simple tool for viewing APK/XAPK/APKM/APKS/ZIP file information and installation.
 
 ## Features
 
-- View APK/XAPK/APKM/APKS basic information (package, version, SDK, permissions, etc.)
-- Show XAPK/APKM/APKS split details (split APK list, OBB list)
+- View APK/XAPK/APKM/APKS/ZIP basic information (package, version, SDK, permissions, etc.)
+- Show XAPK/APKM/APKS/ZIP split details (split APK list, OBB list)
 - Icon preview (PNG/WebP/XML adaptive icons, including gradient-filled vector icons)
 - Configurable icon display size (2 or 3 rows)
 - Signature info viewer and file hash calculation (MD5/SHA1)
-- File renaming (APK/XAPK/APKM/APKS)
+- File renaming (APK/XAPK/APKM/APKS/ZIP)
 - Install via ADB (split APK install and OBB push supported)
 - Built-in tool downloader (download adb/aapt2/apksigner directly from settings, no manual Android SDK setup needed)
 - Customizable theme color
 - Multi-language support (Simplified Chinese, Traditional Chinese, English, Japanese, Korean)
 
 ## Known Issues
-- Slow parsing of certain APK/XAPK/APKM/APKS: This tool uses aapt2 to parse APK, and speed depends on aapt2's performance.
+- Slow parsing of certain APK/XAPK/APKM/APKS/ZIP: This tool uses aapt2 to parse APK, and speed depends on aapt2's performance.
 - Some APK icons may not display exactly as expected: PNG, WebP and XML adaptive icon parsing and rendering (including gradient fills) are now supported, but special or complex adaptive icons may appear slightly different from the actual device display.
 - Due to sandbox restrictions on macOS, there are the following issues:
   - Rename function does not work

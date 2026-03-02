@@ -18,11 +18,11 @@
     "page_in_development": "開発中のページ"
   },
   "open": {
-    "open_apk": "APK/XAPK/APKM/APKSを開く",
+    "open_apk": "APK/XAPK/APKM/APKS/ZIPを開く",
     "open_file_directory": "ファイルの場所を開く",
-    "select_apk_file": "APK/XAPK/APKM/APKSファイルを選択してください",
+    "select_apk_file": "APK/XAPK/APKM/APKS/ZIPファイルを選択してください",
     "close_file": "ファイルを閉じる",
-    "invalid_file_type": "APK/XAPK/APKM/APKSファイルを選択してください"
+    "invalid_file_type": "APK/XAPK/APKM/APKS/ZIPファイルを選択してください"
   },
   "settings": {
     "title": "設定",
