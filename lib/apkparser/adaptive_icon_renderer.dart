@@ -17,10 +17,15 @@ class AdaptiveIconSvgData {
   final xml.XmlElement? backgroundVector;
   final xml.XmlElement? foregroundVector;
 
+  /// 前景层缩放比例（与 AdaptiveIconRenderer 渲染一致）。
+  /// vector drawable 前景使用 1.28x，bitmap 使用 1.60x。
+  final double foregroundScale;
+
   AdaptiveIconSvgData({
     this.backgroundColor,
     this.backgroundVector,
     this.foregroundVector,
+    this.foregroundScale = 1.0,
   });
 
   bool get hasContent =>
@@ -240,6 +245,14 @@ class AdaptiveIconRenderer {
                 '#${(color.toARGB32() & 0xffffffff).toRadixString(16).padLeft(8, '0')}';
           }
         }
+        // 回退：尝试从内联子元素提取颜色（如 <color>, <shape> 等）
+        if (bgColor == null) {
+          final color = await _resolveContainerColor(background, 0);
+          if (color != null) {
+            bgColor =
+                '#${(color.toARGB32() & 0xffffffff).toRadixString(16).padLeft(8, '0')}';
+          }
+        }
       }
     }
 
@@ -257,6 +270,8 @@ class AdaptiveIconRenderer {
       backgroundColor: bgColor,
       backgroundVector: bgVector,
       foregroundVector: fgVector,
+      foregroundScale:
+          fgVector != null ? _kAdaptiveForegroundScaleVector : 1.0,
     );
   }
 
@@ -1662,6 +1677,45 @@ class AdaptiveIconRenderer {
       final text = root.innerText.trim();
       if (_isColorLiteral(text)) {
         return _parseColor(text);
+      }
+    }
+    // <shape> 的 <solid> 子元素可以定义纯色
+    if (tag == 'shape') {
+      final solid = _findDirectChild(root, 'solid');
+      if (solid != null) {
+        final colorAttr = _attr(solid, 'color');
+        if (colorAttr != null) {
+          return _resolveColorRef(colorAttr, depth + 1);
+        }
+      }
+    }
+    return null;
+  }
+
+  /// 从容器元素的内联子元素中提取颜色。
+  /// 支持 `<color>`, `<shape>` 等内联定义。
+  Future<Color?> _resolveContainerColor(
+      xml.XmlElement container, int depth) async {
+    if (depth > _kMaxDepth) return null;
+    for (final child in container.childElements) {
+      final tag = child.name.local.toLowerCase();
+      if (tag == 'color') {
+        final colorAttr = _attr(child, 'color');
+        if (colorAttr != null) {
+          return _resolveColorRef(colorAttr, depth + 1);
+        }
+        final text = child.innerText.trim();
+        if (text.isNotEmpty) {
+          return _resolveColorRef(text, depth + 1);
+        }
+      } else if (tag == 'shape') {
+        final solid = _findDirectChild(child, 'solid');
+        if (solid != null) {
+          final colorAttr = _attr(solid, 'color');
+          if (colorAttr != null) {
+            return _resolveColorRef(colorAttr, depth + 1);
+          }
+        }
       }
     }
     return null;

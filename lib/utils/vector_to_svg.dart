@@ -90,7 +90,7 @@ class VectorToSvg {
       }
     }
 
-    // Foreground 层
+    // Foreground 层 — 应用自适应图标前景缩放（与 AdaptiveIconRenderer 渲染一致）
     if (data.foregroundVector != null) {
       final fgVpW =
           _parseDim(_attr(data.foregroundVector!, 'viewportWidth')) ??
@@ -98,15 +98,31 @@ class VectorToSvg {
       final fgVpH =
           _parseDim(_attr(data.foregroundVector!, 'viewportHeight')) ??
               viewportH;
-      if (fgVpW != viewportW || fgVpH != viewportH) {
+      final fgScale = data.foregroundScale;
+      final needsFgScale = (fgScale - 1.0).abs() > 1e-6;
+      final needsVpScale = fgVpW != viewportW || fgVpH != viewportH;
+
+      var innerIndent = indent;
+      // 自适应前景缩放（从视口中心缩放）
+      if (needsFgScale) {
+        final cx = viewportW / 2;
+        final cy = viewportH / 2;
         contentBuf.writeln(
-            '$indent<g transform="scale(${viewportW / fgVpW}, ${viewportH / fgVpH})">');
+            '$indent<g transform="translate($cx, $cy) scale($fgScale) translate(${-cx}, ${-cy})">');
+        innerIndent = '$indent  ';
+      }
+      if (needsVpScale) {
+        contentBuf.writeln(
+            '$innerIndent<g transform="scale(${viewportW / fgVpW}, ${viewportH / fgVpH})">');
         _convertChildren(contentBuf,
-            data.foregroundVector!.childElements, '$indent  ', gradientDefs);
-        contentBuf.writeln('$indent</g>');
+            data.foregroundVector!.childElements, '$innerIndent  ', gradientDefs);
+        contentBuf.writeln('$innerIndent</g>');
       } else {
         _convertChildren(contentBuf,
-            data.foregroundVector!.childElements, indent, gradientDefs);
+            data.foregroundVector!.childElements, innerIndent, gradientDefs);
+      }
+      if (needsFgScale) {
+        contentBuf.writeln('$indent</g>');
       }
     }
 
