@@ -40,7 +40,7 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
     var result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       dialogTitle: t.open.select_apk_file,
-      allowedExtensions: ['apk', 'xapk', 'apkm', 'apks'],
+      allowedExtensions: ['apk', 'xapk', 'apkm', 'apks', 'apk.1', 'apk.1.1'],
       lockParentWindow: true,
     );
     log.fine('openFilePicker: result=$result');
@@ -347,11 +347,14 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
             // 只处理第一个文件
             if (details.files.isNotEmpty) {
               final file = details.files.first;
-              final extension = file.path.toLowerCase();
-              if (extension.endsWith('.apk') ||
-                  extension.endsWith('.xapk') ||
-                  extension.endsWith('.apkm') ||
-                  extension.endsWith('.apks')) {
+              final lowered = file.path.toLowerCase();
+              if (lowered.endsWith('.apk') ||
+                  lowered.endsWith('.xapk') ||
+                  lowered.endsWith('.apkm') ||
+                  lowered.endsWith('.apks') ||
+                  lowered.endsWith('.zip') ||
+                  RegExp(r'\.(apk|xapk|apkm|apks)(\.\d+)+$')
+                      .hasMatch(lowered)) {
                 openApk(file.path);
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(
