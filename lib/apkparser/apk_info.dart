@@ -132,15 +132,15 @@ Future<_ZipContentType> _detectZipContentType(String zipPath) async {
     if (!await zip.open(zipPath)) return _ZipContentType.notApk;
     final files = zip.listFiles();
 
-    // 检查是否包含 .apk 文件（优先级高于 renamedApk）
-    final hasApkFiles = files.any((f) => f.toLowerCase().endsWith('.apk'));
-
-    // 检查 ZIP 根目录是否有 AndroidManifest.xml → 说明这是重命名的 APK
+    // 检查 ZIP 根目录是否有 AndroidManifest.xml → 说明这是重命名的 APK（优先级最高）
     final hasRootManifest =
         files.any((f) => f.toLowerCase() == 'androidmanifest.xml');
 
-    if (hasApkFiles) return _ZipContentType.containsApks;
+    // 检查是否包含 .apk 文件
+    final hasApkFiles = files.any((f) => f.toLowerCase().endsWith('.apk'));
+
     if (hasRootManifest) return _ZipContentType.renamedApk;
+    if (hasApkFiles) return _ZipContentType.containsApks;
     return _ZipContentType.notApk;
   } finally {
     zip.close();
