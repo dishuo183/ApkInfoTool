@@ -124,6 +124,29 @@ String _archiveTypeFromExtension(String extension) {
   return 'XAPK';
 }
 
+enum _ZipContentType { renamedApk, containsApks, notApk }
+
+Future<_ZipContentType> _detectZipContentType(String zipPath) async {
+  final zip = ZipHelper();
+  try {
+    if (!await zip.open(zipPath)) return _ZipContentType.notApk;
+    final files = zip.listFiles();
+
+    // 检查是否包含 .apk 文件（优先级高于 renamedApk）
+    final hasApkFiles = files.any((f) => f.toLowerCase().endsWith('.apk'));
+
+    // 检查 ZIP 根目录是否有 AndroidManifest.xml → 说明这是重命名的 APK
+    final hasRootManifest =
+        files.any((f) => f.toLowerCase() == 'androidmanifest.xml');
+
+    if (hasApkFiles) return _ZipContentType.containsApks;
+    if (hasRootManifest) return _ZipContentType.renamedApk;
+    return _ZipContentType.notApk;
+  } finally {
+    zip.close();
+  }
+}
+
 final _kSplitAbiTokens = <String>{
   'armeabi',
   'armeabi_v7a',
@@ -235,12 +258,28 @@ Future<ApkInfo?> getApkInfo(String apk) async {
   apkInfo.apkPath = apk;
   apkInfo.apkSize = File(apk).lengthSync();
 
-  // 检查是否为XAPK/APKM/APKS格式
-  if (_isArchiveApk(apk)) {
-    final extension = path.extension(apk).toLowerCase();
-    log.fine("getApkInfo: parsing XAPK/APKM/APKS file");
+  // ZIP 文件智能检测：区分重命名的 APK 和包含多个 APK 的压缩包
+  final extension = path.extension(apk).toLowerCase();
+  bool zipAsArchive = false;
+
+  if (extension == '.zip') {
+    final zipType = await _detectZipContentType(apk);
+    log.fine("getApkInfo: ZIP content type=$zipType");
+    if (zipType == _ZipContentType.containsApks) {
+      zipAsArchive = true;
+    } else if (zipType == _ZipContentType.notApk) {
+      log.warning("getApkInfo: ZIP file contains no APK content");
+      return null;
+    }
+    // renamedApk: fall through to aapt2 direct parsing
+  }
+
+  // 检查是否为XAPK/APKM/APKS格式，或 ZIP 内含多个 APK
+  if (_isArchiveApk(apk) || zipAsArchive) {
+    log.fine("getApkInfo: parsing archive file (zipAsArchive=$zipAsArchive)");
     apkInfo.isXapk = true;
-    apkInfo.archiveType = _archiveTypeFromExtension(extension);
+    apkInfo.archiveType =
+        zipAsArchive ? 'ZIP' : _archiveTypeFromExtension(extension);
 
     // 共享同一个 ZipHelper 实例，避免重复打开同一个大文件
     final zip = ZipHelper();

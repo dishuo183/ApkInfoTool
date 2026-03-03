@@ -122,7 +122,13 @@ class _APKInfoPageState extends ConsumerState<APKInfoPage> {
 
     try {
       final apkInfo = await getApkInfo(filePath);
-      if (apkInfo != null) {
+      if (apkInfo == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(t.parse.parse_apk_info_fail)),
+          );
+        }
+      } else {
         if (enableSignature &&
             !apkInfo.isXapk &&
             apkInfo.signatureInfo.isEmpty) {
