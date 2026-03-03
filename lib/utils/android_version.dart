@@ -5,6 +5,7 @@ class AndroidVersion {
   }
 
   static const _versions = {
+    36: "Android 16",
     35: "Android 15",
     34: "Android 14",
     33: "Android 13",
